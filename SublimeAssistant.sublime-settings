@@ -1,0 +1,6 @@
+{
+    "api_url": "http://localhost:11434/v1/chat/completions",
+    "api_key": "",
+    "model": "devstral-small-2:latest",
+    "system_prompt": "You are Devstral. You are an expert coding assistant inside Sublime Text. Be concise. When asked to write code, provide only the necessary code block."
+}
