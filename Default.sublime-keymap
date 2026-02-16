@@ -1,6 +1,6 @@
 [
     { 
         "keys": ["ctrl+l"], 
-        "command": "cursor_llama_ask" 
+        "command": "sublime_assistant_ask" 
     }
 ]

@@ -13,6 +13,10 @@ class SublimeAssistantAskCommand(sublime_plugin.TextCommand):
     def run(self, edit):
         window = self.view.window()
         
+        # Safety check: if run from a context where there is no window
+        if not window:
+            return
+        
         # 1. Grab Context (Active file + Selection)
         file_context = self.view.substr(sublime.Region(0, self.view.size()))
         current_file_name = self.view.file_name() or "Untitled"
@@ -22,28 +26,32 @@ class SublimeAssistantAskCommand(sublime_plugin.TextCommand):
         selected_text = "\n".join(selected_list)
         
         # 2. Open Input Panel (Bottom Bar)
+        # We pass 'window' explicitly to on_done to prevent "NoneType" errors if view closes
         window.show_input_panel(
             "Ask Assistant (@filename to include):", 
             "", 
-            lambda user_query: self.on_done(user_query, file_context, current_file_name, selected_text), 
+            lambda user_query: self.on_done(window, user_query, file_context, current_file_name, selected_text), 
             None, 
             None
         )
 
-    def on_done(self, user_query, file_context, current_file_name, selected_text):
-        if not user_query.strip():
+    def on_done(self, window, user_query, file_context, current_file_name, selected_text):
+        # Safety check: if window was closed before pressing enter
+        if window is None or not user_query.strip():
             return
-
-        window = self.view.window()
 
         # 3. Prepare the Chat View (Side Panel)
         chat_view = self.get_or_create_chat_view(window)
+        if not chat_view:
+            return
         
         # 4. Update UI IMMEDIATELY
-        # We print the User message AND the Assistant header + Placeholder right now.
-        # This gives instant feedback.
-        user_block = "\n___\n\n## User\n{}\n\n".format(user_query)
-        bot_block = "## Assistant \n> _Thinking..._"
+        # VISUAL CHANGE: We wrap the User Query in a ```text block.
+        # This creates a "Box/Bubble" effect in the Midnight theme.
+        user_block = "\n___\n\n## 👤 User\n```text\n{}\n```\n\n".format(user_query)
+        
+        # We add the Assistant Header + Thinking placeholder
+        bot_block = "## 🤖 Assistant\n> _Thinking..._"
         
         self.append_to_view(chat_view, user_block + bot_block)
 
@@ -55,6 +63,10 @@ class SublimeAssistantAskCommand(sublime_plugin.TextCommand):
         thread.start()
 
     def get_or_create_chat_view(self, window):
+        # Safety check again
+        if not window:
+            return None
+
         for view in window.views():
             if view.name() == "SublimeAssistant Chat":
                 window.focus_view(view)
@@ -75,6 +87,7 @@ class SublimeAssistantAskCommand(sublime_plugin.TextCommand):
         chat_view.settings().set("line_numbers", False)
         chat_view.settings().set("gutter", False)
         try:
+            # Markdown syntax is essential for the coloring to work
             chat_view.assign_syntax("Packages/Markdown/Markdown.sublime-syntax")
         except:
             pass
@@ -85,13 +98,15 @@ class SublimeAssistantAskCommand(sublime_plugin.TextCommand):
         view.run_command("sublime_assistant_append", {"text": text})
 
     def find_file_content(self, window, filename_query):
-        filename_query = os.path.basename(filename_query)  # Get just the filename part
+        if not window: return None
+        
+        filename_query = os.path.basename(filename_query)
         filename_query = filename_query.strip()
 
-        # Check open tabs first
+        # Check open tabs
         for view in window.views():
             path = view.file_name()
-            if path and os.path.basename(path) == filename_query:  # Compare just filenames
+            if path and os.path.basename(path) == filename_query:
                 return view.substr(sublime.Region(0, view.size()))
             elif view.name() == filename_query:
                  return view.substr(sublime.Region(0, view.size()))
@@ -103,7 +118,7 @@ class SublimeAssistantAskCommand(sublime_plugin.TextCommand):
         for folder in folders:
             for root, dirs, files in os.walk(folder):
                 dirs[:] = [d for d in dirs if d not in ignore_dirs]
-                if filename_query in files:  # Compare just filenames
+                if filename_query in files:
                     full_path = os.path.join(root, filename_query)
                     try:
                         with open(full_path, "r", encoding="utf-8") as f:
@@ -113,7 +128,6 @@ class SublimeAssistantAskCommand(sublime_plugin.TextCommand):
         return None
 
     def process_and_call_api(self, window, chat_view, user_query, active_file_context, active_filename, selected_text):
-        # Parse @filename
         referenced_files_content = ""
         file_matches = re.findall(r'@([a-zA-Z0-9_\-\.]+\.[a-zA-Z0-9]+)', user_query)
         
@@ -168,7 +182,8 @@ class SublimeAssistantAskCommand(sublime_plugin.TextCommand):
                 method="POST"
             )
             
-            response = urllib.request.urlopen(req)
+            # Added timeout to prevent hanging forever if Ollama is down
+            response = urllib.request.urlopen(req, timeout=30)
             result = json.loads(response.read().decode("utf-8"))
             
             if "choices" in result and len(result["choices"]) > 0:
