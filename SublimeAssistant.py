@@ -75,8 +75,20 @@ def _call_api(
 
     win_id = window.id()
     messages = history.get_messages(win_id, system_prompt) + [{"role": "user", "content": full_content}]
+    tools = [api.FETCH_URL_TOOL]
+    request_timeout = max(1, int(settings.get("request_timeout") or 30))
 
-    reply, success = api.call(url, api_key, model, messages)
+    def on_tool_call(tool_name: str, url_or_args: str) -> None:
+        if tool_name != "fetch_url":
+            return
+        display_url = url_or_args if len(url_or_args) <= 60 else url_or_args[:57] + "..."
+        status = f"> _Fetching {display_url}..._"
+        sublime.set_timeout(
+            lambda: panel.run_command("sublime_assistant_update_placeholder", {"text": status}),
+            0,
+        )
+
+    reply, success = api.call(url, api_key, model, messages, tools=tools, on_tool_call=on_tool_call, timeout_seconds=request_timeout)
 
     if success:
         history.append(win_id, "user", full_content)
@@ -310,12 +322,30 @@ class SublimeAssistantAppendCommand(sublime_plugin.TextCommand):
 
 
 class SublimeAssistantReplacePlaceholderCommand(sublime_plugin.TextCommand):
+    """Replace a placeholder text in the chat panel with assistant response and add application phantoms.
+
+    This command handles two scenarios:
+    1. Replaces the placeholder at the end of the view with the assistant's response text
+    2. If no placeholder is found, simply appends the response text
+
+    The command also triggers the addition of 'Apply' phantoms for any code blocks
+    in the response, allowing users to apply the suggested changes to their code.
+
+    Args:
+        edit: The edit object provided by Sublime Text command system.
+        text: The response text from the assistant to be inserted.
+        selection_region: Optional [start_line, end_line] region for code placement precision.
+
+    Returns:
+        None: This command directly modifies the view through the edit object.
+    """
+
     def run(self, edit, text: str, selection_region: list[int] | None = None):
+        """Execute the replacement of placeholder with assistant response text."""
         self.view.set_read_only(False)
         file_size = self.view.size()
-        region = sublime.Region(file_size - len(chat_view.PLACEHOLDER), file_size)
-
-        if self.view.substr(region) == chat_view.PLACEHOLDER:
+        region = chat_view.find_placeholder_region(self.view)
+        if region is not None:
             insert_start = region.begin()
             self.view.replace(edit, region, text)
         else:
@@ -324,6 +354,17 @@ class SublimeAssistantReplacePlaceholderCommand(sublime_plugin.TextCommand):
 
         _add_apply_phantoms(self.view, insert_start, text, selection_region)
         self.view.show(self.view.size())
+        self.view.set_read_only(True)
+
+
+class SublimeAssistantUpdatePlaceholderCommand(sublime_plugin.TextCommand):
+    """Update the status placeholder (e.g. to show 'Fetching &lt;url&gt;...') during tool calls."""
+
+    def run(self, edit, text: str):
+        self.view.set_read_only(False)
+        region = chat_view.find_placeholder_region(self.view)
+        if region is not None:
+            self.view.replace(edit, region, text)
         self.view.set_read_only(True)
 
 

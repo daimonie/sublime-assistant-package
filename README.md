@@ -19,6 +19,7 @@ leaving the keyboard. Lightweight, thread-safe, and runs on Python 3.8.
 - **Apply with diff preview** — Every code block the assistant produces gets an **Apply** button. Clicking it opens a unified diff preview where you can **Accept** or **Reject** the change before anything is written to disk.
 - **New file creation** — When the LLM suggests a brand-new file, the Apply workflow lets you review and create it with one click.
 - **Asynchronous** — API calls run in a background thread; the UI never freezes.
+- **Fetch URL tool** — When you ask to read or check a web page, the assistant can call a `fetch_url` tool to retrieve the page content (same for **local** and **Mistral**). Fetched content is truncated to 80k characters. If you see "truncating input prompt" in Ollama logs, raise Ollama's context limit (e.g. `OLLAMA_NUM_CTX=32768` or higher; Devstral supports 384k). The system prompt instructs the assistant to always respond in English.
 
 ---
 
@@ -76,6 +77,7 @@ Edit `SublimeAssistant.sublime-settings` (or create a User override in `Packages
 
 You can switch between **local** (Ollama) and **Mistral API** (e.g. at a client) without editing URLs or keys each time.
 
+- **`request_timeout`** — Timeout in seconds for the AI request (default 30). Increase this (e.g. 60–120) if you get timeouts with slow token generation or long context (e.g. after fetch_url).
 - **`active_preset`** — Which preset is used for API calls: `"local"` or `"mistral"` (or any custom preset name).
 - **`presets`** — Map of preset names to `api_url`, `api_key`, and `model`. Top-level `api_url` / `api_key` / `model` are used when no preset is active or as defaults when a preset omits a key.
 
@@ -83,6 +85,7 @@ Example:
 
 ```json
 {
+    "request_timeout": 120,
     "active_preset": "local",
     "presets": {
         "local": {
@@ -141,8 +144,10 @@ If you don’t use presets, the top-level keys still work as before:
 }
 ```
 
-### Troubleshooting (e.g. Mistral 400)
+### Troubleshooting (e.g. Mistral 400, timeouts)
 
+- **405 Method Not Allowed (Ollama):** We send a `tools` parameter so the assistant can use fetch_url. Point the **local** preset at **Ollama directly** (`http://localhost:11434/v1/chat/completions`), not at Open WebUI (port 3000)—Open WebUI’s API may reject requests that include `tools`. Ollama 0.15.x supports [tool calling](https://docs.ollama.com/capabilities/tool-calling) on that endpoint. If Sublime runs on Windows and Ollama is in WSL, use the WSL hostname or IP instead of `localhost` (e.g. `http://LanteanHome:11434/v1/chat/completions`).
+- **Request timed out:** If you see “request timed out after N seconds”, the AI backend took too long (e.g. model loading, overloaded, or slow token gen with long input). If the **fetch_url** tool times out, the error will say “request timed out after N seconds. Increase **`request_timeout`** in settings (e.g. 60 or 120) for slow token gen or long context; fetch_url uses a separate 30s timeout.
 - **See the full error:** Reload the plugin (save any file in `SublimeAssistant/assistant/` or restart Sublime). The next failed request will show **Request** (URL, model, message count) and **Response body** in the chat so you can see the server’s reason (e.g. invalid model id, auth, or message format).
 - **Request format:** We send `POST` to your `api_url` with body `{ "model": "...", "messages": [{"role":"system"|"user"|"assistant","content":"..."}, ...], "stream": false }`, matching the [Mistral Chat Completion API](https://docs.mistral.ai/api).
 - **Model IDs:** Use [List models](https://docs.mistral.ai/api/endpoint/models) (`GET https://api.mistral.ai/v1/models`) with your API key to see valid `model` values. If Devstral isn’t available, set `presets.mistral.model` to `mistral-small-latest` in User settings.
@@ -184,7 +189,7 @@ SublimeAssistant/
 
 ## Local Development Stack
 
-A `docker-compose.yaml` is included to spin up Ollama + Open WebUI locally with GPU support:
+A `docker-compose.yaml` is included to spin up Ollama + Open WebUI locally with GPU support. Ollama runs with `OLLAMA_NUM_CTX=65536` so the fetch_url tool and large conversations don't get truncated.
 
 ```bash
 docker compose up -d

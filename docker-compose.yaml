@@ -7,6 +7,9 @@ services:
     restart: unless-stopped
     ports:
       - "11434:11434"
+    environment:
+      # Avoid "truncating input prompt" when using fetch_url with large pages (Devstral supports 384k)
+      - OLLAMA_NUM_CTX=65536
     volumes:
       - ollama:/root/.ollama
     networks:

@@ -56,3 +56,12 @@ def user_block(query: str, hints: list[str] | None = None) -> str:
 def assistant_header(preset: str = "") -> str:
     label = "Assistant" if not preset else f"Assistant ({preset})"
     return f"## 🤖 {label}\n{PLACEHOLDER}"
+
+
+def find_placeholder_region(view: sublime.View) -> sublime.Region | None:
+    """Return the region from the last '> _' to end of view, or None if not found."""
+    content = view.substr(sublime.Region(0, view.size()))
+    idx = content.rfind("> _")
+    if idx == -1:
+        return None
+    return sublime.Region(idx, view.size())
