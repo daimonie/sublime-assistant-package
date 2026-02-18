@@ -1,6 +1,13 @@
 [
-    { 
-        "keys": ["ctrl+l"], 
-        "command": "sublime_assistant_ask" 
+    {
+        "keys": ["ctrl+l"],
+        "command": "sublime_assistant_ask"
+    },
+    {
+        "keys": ["ctrl+enter"],
+        "command": "sublime_assistant_submit",
+        "context": [
+            {"key": "setting.sublime_assistant_input", "operator": "equal", "operand": true}
+        ]
     }
 ]

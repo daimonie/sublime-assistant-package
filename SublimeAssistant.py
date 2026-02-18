@@ -1,242 +1,300 @@
+"""SublimeAssistant – AI coding assistant for Sublime Text."""
+from __future__ import annotations
+
+import importlib
+import itertools
+import os
+import sys
+import threading
+
 import sublime
 import sublime_plugin
-import json
-import urllib.request
-import threading
-import os
-import re
 
-# Global conversation history storage per window_id
-CHAT_HISTORY = {}
+from .assistant import api, code_extractor, context, history, input_view
+from .assistant import diff_view as diff_mgr
+from .assistant import view as chat_view
+
+# block_id -> (code_content, filepath | None, selection_region | None)
+# selection_region is [start_line, end_line] (0-indexed, exclusive end)
+_pending_blocks: dict[str, tuple[str, str | None, list[int] | None]] = {}
+_block_counter = itertools.count()
+
+
+def plugin_unloaded() -> None:
+    """Remove cached submodule entries so they are freshly imported on reload."""
+    prefix = __package__ + ".assistant"
+    for key in [k for k in sys.modules if k.startswith(prefix)]:
+        del sys.modules[key]
+
+
+def _call_api(
+    window: sublime.Window,
+    panel: sublime.View,
+    full_content: str,
+    selection_region: list[int] | None,
+) -> None:
+    """
+    Call the API with the constructed messages and handle the response.
+
+    This function retrieves the API settings, constructs the message history including
+    the current user query, sends it to the API, and processes the response by:
+    - Updating the message history
+    - Replacing the placeholder in the chat panel with the API response
+    - Adding apply phantoms for any fenced code blocks in the response
+
+    Args:
+        window: The Sublime Text window containing the chat panel.
+        panel: The chat panel view where responses will be displayed.
+        full_content: The complete content to send to the API (query + context).
+        selection_region: Optional line range [start, end] of the current selection,
+                         used for precise code block application.
+
+    Returns:
+        None: All operations are performed asynchronously via callbacks.
+    """
+    settings = sublime.load_settings("SublimeAssistant.sublime-settings")
+    url = settings.get("api_url", "http://localhost:11434/v1/chat/completions")
+    model = settings.get("model", "devstral-small-2:latest")
+    system_prompt = settings.get("system_prompt", "You are a helpful coding assistant.")
+    api_key = settings.get("api_key", "")
+
+    win_id = window.id()
+    messages = history.get_messages(win_id, system_prompt) + [{"role": "user", "content": full_content}]
+
+    reply, success = api.call(url, api_key, model, messages)
+
+    if success:
+        history.append(win_id, "user", full_content)
+        history.append(win_id, "assistant", reply)
+
+    sublime.set_timeout(
+        lambda: panel.run_command("sublime_assistant_replace_placeholder", {
+            "text": reply + "\n",
+            "selection_region": selection_region,
+        }),
+        0,
+    )
+
+
+def _submit_query(
+    window: sublime.Window,
+    panel: sublime.View,
+    query: str,
+    active_file: str,
+    active_filename: str,
+    selection: str,
+    selection_region: list[int] | None,
+) -> None:
+    """
+    Submit the user query to the assistant and initiate the API call workflow.
+
+    This function builds context and constructs the chat panel message block,
+    then starts an asynchronous thread to call the API and handle the response.
+
+    Args:
+        window: The Sublime Text window where the chat is occurring.
+        panel: The chat panel view where messages are displayed.
+        query: The user-submitted question or instruction.
+        active_file: The full content of the currently active editor file.
+        active_filename: The filename (or "Untitled") of the active file.
+        selection: The text currently selected in the active editor.
+        selection_region: Optional [start_line, end_line] for precise code applying.
+
+    Returns:
+        None: Operations are performed asynchronously via callbacks.
+    """
+    result = context.build(window, query, active_file, active_filename, selection)
+    panel.run_command("sublime_assistant_append", {
+        "text": chat_view.user_block(query, result.hints) + chat_view.assistant_header()
+    })
+    threading.Thread(
+        target=_call_api,
+        args=(window, panel, result.content, selection_region),
+        daemon=True,
+    ).start()
+
+
+def _add_apply_phantoms(
+    view: sublime.View,
+    insert_start: int,
+    reply_text: str,
+    selection_region: list[int] | None,
+) -> None:
+    """Add an Apply phantom after each fenced code block in the just-inserted reply."""
+    window = view.window()
+    if not window:
+        return
+
+    for block in code_extractor.extract(reply_text):
+        block_id = f"block_{next(_block_counter)}"
+        _pending_blocks[block_id] = (block.content, block.filepath, selection_region)
+
+        pos = insert_start + block.end_pos
+        html = f'<body id="sa_apply"><a href="apply:{block_id}">Apply</a></body>'
+        view.add_phantom(
+            "assistant_apply",
+            sublime.Region(pos, pos),
+            html,
+            sublime.LAYOUT_BLOCK,
+            on_navigate=lambda href, w=window: _on_apply_navigate(href, w),
+        )
+
+
+def _on_apply_navigate(href: str, window: sublime.Window) -> None:
+    if not href.startswith("apply:"):
+        return
+
+    block_id = href[6:]
+    entry = _pending_blocks.get(block_id)
+    if not entry:
+        return
+
+    code, filepath, sel_region = entry
+
+    if filepath is not None:
+        target = next(
+            (v for v in window.views() if v.file_name() and
+             os.path.basename(v.file_name()) == os.path.basename(filepath)),
+            None,
+        )
+        if target is None and os.path.isfile(filepath):
+            target = window.open_file(filepath)
+
+        diff_id = f"diff_{block_id}"
+        if target:
+            diff_mgr.open_diff(window, diff_id, target, code, hint_region=None)
+        else:
+            diff_mgr.open_new_file_preview(window, diff_id, filepath, code)
+    else:
+        target = window.active_view_in_group(0)
+        if target:
+            # Use the selection region as a precise hint if available
+            hint = tuple(sel_region) if sel_region else None
+            diff_mgr.open_diff(window, f"diff_{block_id}", target, code, hint_region=hint)
+
+
+# ── Commands ──────────────────────────────────────────────────────────────────
 
 class SublimeAssistantAskCommand(sublime_plugin.TextCommand):
+    """Open/focus the input area, creating the chat pane if needed."""
+
     def run(self, edit):
         window = self.view.window()
-        
-        # Safety check: if run from a context where there is no window
         if not window:
             return
-        
-        # 1. Grab Context (Active file + Selection)
-        file_context = self.view.substr(sublime.Region(0, self.view.size()))
-        current_file_name = self.view.file_name() or "Untitled"
-        
-        selections = self.view.sel()
-        selected_list = [self.view.substr(r) for r in selections if not r.empty()]
-        selected_text = "\n".join(selected_list)
-        
-        # 2. Open Input Panel (Bottom Bar)
-        # We pass 'window' explicitly to on_done to prevent "NoneType" errors if view closes
-        window.show_input_panel(
-            "Ask Assistant (@filename to include):", 
-            "", 
-            lambda user_query: self.on_done(window, user_query, file_context, current_file_name, selected_text), 
-            None, 
-            None
-        )
+        chat_view.get_or_create(window)
+        inp = input_view.get_or_create(window)
+        if inp:
+            window.focus_view(inp)
 
-    def on_done(self, window, user_query, file_context, current_file_name, selected_text):
-        # Safety check: if window was closed before pressing enter
-        if window is None or not user_query.strip():
+
+class SublimeAssistantSubmitCommand(sublime_plugin.TextCommand):
+    """Submit the input area content as a query (Ctrl+Enter in input view)."""
+
+    def run(self, edit):
+        window = self.view.window()
+        query = self.view.substr(sublime.Region(0, self.view.size())).strip()
+        if not window or not query:
             return
 
-        # 3. Prepare the Chat View (Side Panel)
-        chat_view = self.get_or_create_chat_view(window)
-        if not chat_view:
-            return
-        
-        # 4. Update UI IMMEDIATELY
-        # VISUAL CHANGE: We wrap the User Query in a ```text block.
-        # This creates a "Box/Bubble" effect in the Midnight theme.
-        user_block = "\n___\n\n## 👤 User\n```text\n{}\n```\n\n".format(user_query)
-        
-        # We add the Assistant Header + Thinking placeholder
-        bot_block = "## 🤖 Assistant\n> _Thinking..._"
-        
-        self.append_to_view(chat_view, user_block + bot_block)
+        self.view.replace(edit, sublime.Region(0, self.view.size()), "")
 
-        # 5. Run API in background thread
-        thread = threading.Thread(
-            target=self.process_and_call_api, 
-            args=(window, chat_view, user_query, file_context, current_file_name, selected_text)
-        )
-        thread.start()
-
-    def get_or_create_chat_view(self, window):
-        # Safety check again
-        if not window:
-            return None
-
-        for view in window.views():
-            if view.name() == "SublimeAssistant Chat":
-                window.focus_view(view)
-                return view
-        
-        if window.num_groups() < 2:
-            window.set_layout({
-                "cols": [0.0, 0.7, 1.0], 
-                "rows": [0.0, 1.0], 
-                "cells": [[0, 0, 1, 1], [1, 0, 2, 1]]
-            })
-        
-        window.focus_group(1)
-        chat_view = window.new_file()
-        chat_view.set_name("SublimeAssistant Chat")
-        chat_view.set_scratch(True)
-        chat_view.settings().set("word_wrap", True)
-        chat_view.settings().set("line_numbers", False)
-        chat_view.settings().set("gutter", False)
-        try:
-            # Markdown syntax is essential for the coloring to work
-            chat_view.assign_syntax("Packages/Markdown/Markdown.sublime-syntax")
-        except:
-            pass
-        
-        return chat_view
-
-    def append_to_view(self, view, text):
-        view.run_command("sublime_assistant_append", {"text": text})
-
-    def find_file_content(self, window, filename_query):
-        if not window: return None
-        
-        filename_query = os.path.basename(filename_query)
-        filename_query = filename_query.strip()
-
-        # Check open tabs
-        for view in window.views():
-            path = view.file_name()
-            if path and os.path.basename(path) == filename_query:
-                return view.substr(sublime.Region(0, view.size()))
-            elif view.name() == filename_query:
-                 return view.substr(sublime.Region(0, view.size()))
-
-        # Check folders
-        folders = window.folders()
-        ignore_dirs = {".git", "node_modules", "__pycache__", "dist", "build", "vendor"}
-
-        for folder in folders:
-            for root, dirs, files in os.walk(folder):
-                dirs[:] = [d for d in dirs if d not in ignore_dirs]
-                if filename_query in files:
-                    full_path = os.path.join(root, filename_query)
-                    try:
-                        with open(full_path, "r", encoding="utf-8") as f:
-                            return f.read()
-                    except:
-                        return "Error reading file: " + filename_query
-        return None
-
-    def process_and_call_api(self, window, chat_view, user_query, active_file_context, active_filename, selected_text):
-        referenced_files_content = ""
-        file_matches = re.findall(r'@([a-zA-Z0-9_\-\.]+\.[a-zA-Z0-9]+)', user_query)
-        
-        for fname in file_matches:
-            content = self.find_file_content(window, fname)
-            if content:
-                referenced_files_content += "\n\n--- REFERENCED FILE: {} ---\n{}\n".format(fname, content)
+        editor = window.active_view_in_group(0)
+        if editor:
+            active_file     = editor.substr(sublime.Region(0, editor.size()))
+            active_filename = editor.file_name() or "Untitled"
+            non_empty       = [r for r in editor.sel() if not r.empty()]
+            selection       = "\n".join(editor.substr(r) for r in non_empty)
+            if non_empty:
+                start_line = editor.rowcol(non_empty[0].begin())[0]
+                end_line   = editor.rowcol(non_empty[-1].end())[0] + 1
+                selection_region: list[int] | None = [start_line, end_line]
             else:
-                referenced_files_content += "\n\n--- REFERENCED FILE: {} (NOT FOUND) ---\n".format(fname)
+                selection_region = None
+        else:
+            active_file, active_filename, selection, selection_region = "", "Untitled", "", None
 
-        self.call_api(window.id(), chat_view, user_query, active_file_context, active_filename, selected_text, referenced_files_content)
+        panel = chat_view.get_or_create(window)
+        if panel:
+            _submit_query(window, panel, query, active_file, active_filename,
+                          selection, selection_region)
 
-    def call_api(self, win_id, chat_view, user_query, active_file_context, active_filename, selected_text, extra_file_context):
-        settings = sublime.load_settings("SublimeAssistant.sublime-settings")
-        api_url = settings.get("api_url", "http://localhost:11434/v1/chat/completions")
-        model = settings.get("model", "devstral-small-2:latest")
-        system_prompt = settings.get("system_prompt", "You are a helpful coding assistant.")
-        api_key = settings.get("api_key", "")
-        
-        if win_id not in CHAT_HISTORY:
-            CHAT_HISTORY[win_id] = [{"role": "system", "content": system_prompt}]
 
-        context_block = ""
-        if active_file_context:
-            context_block += "--- ACTIVE FILE ({}) ---\n{}\n\n".format(active_filename, active_file_context)
-        if extra_file_context:
-            context_block += extra_file_context + "\n\n"
-        if selected_text:
-            context_block += "--- SELECTED CODE ---\n{}\n\n".format(selected_text)
-        
-        full_user_content = "{}--- QUERY ---\n{}".format(context_block, user_query)
-
-        current_messages = list(CHAT_HISTORY[win_id])
-        current_messages.append({"role": "user", "content": full_user_content})
-
-        data = {
-            "model": model,
-            "messages": current_messages,
-            "stream": False
-        }
-
-        headers = {"Content-Type": "application/json"}
-        if api_key:
-            headers["Authorization"] = "Bearer {}".format(api_key)
-
-        reply = ""
-        try:
-            req = urllib.request.Request(
-                api_url, 
-                data=json.dumps(data).encode("utf-8"), 
-                headers=headers, 
-                method="POST"
-            )
-            
-            # Added timeout to prevent hanging forever if Ollama is down
-            response = urllib.request.urlopen(req, timeout=30)
-            result = json.loads(response.read().decode("utf-8"))
-            
-            if "choices" in result and len(result["choices"]) > 0:
-                reply = result["choices"][0]["message"]["content"]
-            elif "message" in result:
-                reply = result["message"]["content"]
-            else:
-                reply = "Error: Unexpected API response format."
-
-            CHAT_HISTORY[win_id].append({"role": "user", "content": full_user_content})
-            CHAT_HISTORY[win_id].append({"role": "assistant", "content": reply})
-
-        except Exception as e:
-            reply = "Error connecting to AI: {}".format(str(e))
-
-        sublime.set_timeout(lambda: self.update_chat_view(chat_view, reply), 0)
-
-    def update_chat_view(self, view, reply):
-        # Format lines with quote indicators for the gray background effect
-        lines = reply.split('\n')
-        quoted_lines = ["> " + line for line in lines]
-        formatted_reply = "\n".join(quoted_lines) + "\n"
-
-        # Call the new command that REPLACES the placeholder
-        view.run_command("sublime_assistant_replace_placeholder", {"text": formatted_reply})
-
-# Helper command just for appending
 class SublimeAssistantAppendCommand(sublime_plugin.TextCommand):
-    def run(self, edit, text):
+    def run(self, edit, text: str):
         self.view.set_read_only(False)
         self.view.insert(edit, self.view.size(), text)
         self.view.show(self.view.size())
         self.view.set_read_only(True)
 
-# NEW Helper command to Swap "Thinking..." with real answer
+
 class SublimeAssistantReplacePlaceholderCommand(sublime_plugin.TextCommand):
-    def run(self, edit, text):
+    def run(self, edit, text: str, selection_region: list[int] | None = None):
         self.view.set_read_only(False)
-        
-        # Define the exact placeholder string we added in on_done
-        placeholder = "> _Thinking..._"
-        
-        # Check the end of the file to see if the placeholder is there
-        # We check the last N characters where N is length of placeholder
         file_size = self.view.size()
-        region = sublime.Region(file_size - len(placeholder), file_size)
-        
-        if self.view.substr(region) == placeholder:
-            # If found, replace it
+        region = sublime.Region(file_size - len(chat_view.PLACEHOLDER), file_size)
+
+        if self.view.substr(region) == chat_view.PLACEHOLDER:
+            insert_start = region.begin()
             self.view.replace(edit, region, text)
         else:
-            # If not found (user typed something else or logic drift), just append
+            insert_start = file_size
             self.view.insert(edit, file_size, text)
-            
+
+        _add_apply_phantoms(self.view, insert_start, text, selection_region)
         self.view.show(self.view.size())
         self.view.set_read_only(True)
+
+
+class SublimeAssistantApplyCodeCommand(sublime_plugin.TextCommand):
+    """Replace the entire content of the target view with proposed code."""
+
+    def run(self, edit, code: str):
+        self.view.set_read_only(False)
+        self.view.replace(edit, sublime.Region(0, self.view.size()), code)
+
+
+class SublimeAssistantApplySnippetCommand(sublime_plugin.TextCommand):
+    """Replace a specific line range in the target view with a code snippet."""
+
+    def run(self, edit, code: str, start_line: int, end_line: int):
+        self.view.set_read_only(False)
+        last_row = self.view.rowcol(self.view.size())[0]
+        start_pt = self.view.text_point(start_line, 0)
+        end_pt   = (self.view.size() if end_line > last_row
+                    else self.view.text_point(end_line, 0))
+        self.view.replace(edit, sublime.Region(start_pt, end_pt), code.rstrip('\n') + '\n')
+
+
+class SublimeAssistantCreateFileCommand(sublime_plugin.WindowCommand):
+    """Write a new file to disk and open it in group 0."""
+
+    def run(self, filepath: str, code: str):
+        try:
+            os.makedirs(os.path.dirname(os.path.abspath(filepath)), exist_ok=True)
+            with open(filepath, "w", encoding="utf-8") as f:
+                f.write(code)
+        except OSError as e:
+            sublime.error_message(f"SublimeAssistant: could not create file\n{e}")
+            return
+        self.window.focus_group(0)
+        self.window.open_file(filepath)
+
+
+class SublimeAssistantReloadListener(sublime_plugin.EventListener):
+    """Auto-reload assistant submodules when their source files are saved."""
+
+    def on_post_save(self, view: sublime.View) -> None:
+        file_path = view.file_name() or ""
+        pkg_path = os.path.dirname(os.path.abspath(__file__))
+        assistant_path = os.path.join(pkg_path, "assistant")
+
+        if not file_path.startswith(assistant_path) or not file_path.endswith(".py"):
+            return
+
+        rel = os.path.relpath(file_path, pkg_path)
+        mod_name = __package__ + "." + rel.replace(os.sep, ".")[:-3]
+
+        if mod_name in sys.modules:
+            importlib.reload(sys.modules[mod_name])
+            sublime.status_message(f"SublimeAssistant: reloaded {mod_name}")

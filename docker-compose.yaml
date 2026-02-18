@@ -1,0 +1,50 @@
+version: '3.8'
+
+services:
+  ollama:
+    image: ollama/ollama:latest
+    container_name: ollama
+    restart: unless-stopped
+    ports:
+      - "11434:11434"
+    volumes:
+      - ollama:/root/.ollama
+    networks:
+      - lantean-network
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+
+  open-webui:
+    image: ghcr.io/open-webui/open-webui:ollama
+    container_name: open-webui
+    restart: unless-stopped
+    ports:
+      - "3000:8080"
+    volumes:
+      - ollama:/root/.ollama
+      - open-webui:/app/backend/data
+    networks:
+      - lantean-network
+    depends_on:
+      - ollama
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+volumes:
+  ollama:
+    driver: local
+  open-webui:
+    driver: local
+
+networks:
+  lantean-network:
+    driver: bridge 
