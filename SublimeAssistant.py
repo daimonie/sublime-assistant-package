@@ -27,6 +27,24 @@ def plugin_unloaded() -> None:
         del sys.modules[key]
 
 
+def _get_api_config(settings: sublime.Settings) -> tuple[str, str, str, str]:
+    """Resolve api_url, api_key, model, system_prompt from active_preset or top-level."""
+    presets = settings.get("presets") or {}
+    active = settings.get("active_preset")
+    p = presets.get(active) if active else None
+
+    def _get(key: str, default: str) -> str:
+        if p and isinstance(p, dict) and key in p and p[key] is not None:
+            return str(p[key])
+        return settings.get(key, default)
+
+    url = _get("api_url", "http://localhost:11434/v1/chat/completions")
+    api_key = _get("api_key", "")
+    model = _get("model", "devstral-small-2:latest")
+    system_prompt = settings.get("system_prompt", "You are a helpful coding assistant.")
+    return url, api_key, model, system_prompt
+
+
 def _call_api(
     window: sublime.Window,
     panel: sublime.View,
@@ -53,10 +71,7 @@ def _call_api(
         None: All operations are performed asynchronously via callbacks.
     """
     settings = sublime.load_settings("SublimeAssistant.sublime-settings")
-    url = settings.get("api_url", "http://localhost:11434/v1/chat/completions")
-    model = settings.get("model", "devstral-small-2:latest")
-    system_prompt = settings.get("system_prompt", "You are a helpful coding assistant.")
-    api_key = settings.get("api_key", "")
+    url, api_key, model, system_prompt = _get_api_config(settings)
 
     win_id = window.id()
     messages = history.get_messages(win_id, system_prompt) + [{"role": "user", "content": full_content}]
@@ -186,6 +201,48 @@ class SublimeAssistantAskCommand(sublime_plugin.TextCommand):
         inp = input_view.get_or_create(window)
         if inp:
             window.focus_view(inp)
+
+
+class SublimeAssistantUsePresetCommand(sublime_plugin.WindowCommand):
+    """Switch the active API preset (e.g. local vs mistral)."""
+
+    def run(self, preset: str = "") -> None:
+        if not preset:
+            return
+        settings = sublime.load_settings("SublimeAssistant.sublime-settings")
+        presets = settings.get("presets") or {}
+        if preset not in presets:
+            sublime.status_message(f"SublimeAssistant: unknown preset «{preset}»")
+            return
+        settings.set("active_preset", preset)
+        sublime.save_settings("SublimeAssistant.sublime-settings")
+        sublime.status_message(f"SublimeAssistant: using preset «{preset}»")
+
+
+class SublimeAssistantSetMistralApiKeyCommand(sublime_plugin.WindowCommand):
+    """Prompt for the Mistral API key and save it to User settings."""
+
+    def run(self) -> None:
+        settings = sublime.load_settings("SublimeAssistant.sublime-settings")
+        presets = dict(settings.get("presets") or {})
+        mistral = dict(presets.get("mistral") or {})
+        initial = mistral.get("api_key") or ""
+
+        def on_done(key: str) -> None:
+            key = key.strip()
+            mistral["api_key"] = key
+            presets["mistral"] = mistral
+            settings.set("presets", presets)
+            sublime.save_settings("SublimeAssistant.sublime-settings")
+            sublime.status_message("SublimeAssistant: Mistral API key saved to User settings.")
+
+        self.window.show_input_panel(
+            "Mistral API key:",
+            initial,
+            on_done,
+            None,
+            None,
+        )
 
 
 class SublimeAssistantSubmitCommand(sublime_plugin.TextCommand):

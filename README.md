@@ -62,12 +62,75 @@ Restart Sublime Text. Requires **Sublime Text 4 build 4050+**.
 | Apply a code suggestion | Click the **Apply** button below any code block |
 | Accept diff | Click **✓ Accept** in the diff preview |
 | Reject diff | Click **✗ Reject** in the diff preview |
+| Switch to local (Ollama) | Command Palette → **Sublime Assistant: Use preset Local** |
+| Switch to Mistral API | Command Palette → **Sublime Assistant: Use preset Mistral** |
+| Set Mistral API key (User settings) | Command Palette → **Sublime Assistant: Set Mistral API key** |
 
 ---
 
 ## Configuration
 
-Edit `SublimeAssistant.sublime-settings` (or create a User override):
+Edit `SublimeAssistant.sublime-settings` (or create a User override in `Packages/User/`).
+
+### Presets
+
+You can switch between **local** (Ollama) and **Mistral API** (e.g. at a client) without editing URLs or keys each time.
+
+- **`active_preset`** — Which preset is used for API calls: `"local"` or `"mistral"` (or any custom preset name).
+- **`presets`** — Map of preset names to `api_url`, `api_key`, and `model`. Top-level `api_url` / `api_key` / `model` are used when no preset is active or as defaults when a preset omits a key.
+
+Example:
+
+```json
+{
+    "active_preset": "local",
+    "presets": {
+        "local": {
+            "api_url": "http://localhost:11434/v1/chat/completions",
+            "api_key": "",
+            "model": "devstral-small-2:latest"
+        },
+        "mistral": {
+            "api_url": "https://api.mistral.ai/v1/chat/completions",
+            "api_key": "YOUR_MISTRAL_API_KEY",
+            "model": "devstral-small-2505"
+        }
+    },
+    "system_prompt": "You are an expert coding assistant inside Sublime Text. Be concise.\n..."
+}
+```
+
+**Devstral on Mistral:** The Mistral API offers Devstral as `devstral-small-2505` (same style of coding assistant as the Ollama `devstral-small-2`). Use the **mistral** preset with that model when you want cloud-backed Devstral without running Ollama.
+
+**Switch preset:** Command Palette (`Ctrl+Shift+P`) → **Sublime Assistant: Use preset Local** or **Sublime Assistant: Use preset Mistral**. The status bar shows the active preset.
+
+### Storing the API key
+
+Keep your Mistral API key out of the plugin folder (and out of version control) by storing it in **User settings**. Sublime merges User settings over the package defaults: values in `Packages/User/SublimeAssistant.sublime-settings` override the same keys in the package, so the key is read from your User file and never needs to live in the repo.
+
+**Option A — Command Palette (recommended)**  
+1. `Ctrl+Shift+P` → **Sublime Assistant: Set Mistral API key**  
+2. Paste your API key in the input bar and press Enter.  
+The key is written to your User settings; the package file is left unchanged.
+
+**Option B — Edit User settings by hand**  
+Create or open `Packages/User/SublimeAssistant.sublime-settings` and set only the key (other preset options stay from the package):
+
+```json
+{
+    "presets": {
+        "mistral": {
+            "api_key": "your-mistral-api-key-here"
+        }
+    }
+}
+```
+
+Sublime merges this with the package settings, so `presets.mistral.api_url` and `model` stay as in the package; only `api_key` is overridden.
+
+### Legacy single-endpoint config
+
+If you don’t use presets, the top-level keys still work as before:
 
 ```json
 {
@@ -97,6 +160,8 @@ defaults to the active editor view.
 ```
 SublimeAssistant/
 ├── SublimeAssistant.py        # Sublime commands + phantom/apply orchestration
+├── Default.sublime-commands   # Command palette: Use preset Local / Mistral
+├── Default.sublime-keymap     # Ctrl+L, Ctrl+Enter
 ├── .python-version            # Python 3.8
 └── assistant/
     ├── api.py                 # HTTP client (OpenAI-compatible)

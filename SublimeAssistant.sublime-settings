@@ -1,4 +1,17 @@
 {
+    "active_preset": "local",
+    "presets": {
+        "local": {
+            "api_url": "http://localhost:11434/v1/chat/completions",
+            "api_key": "",
+            "model": "devstral-small-2:latest"
+        },
+        "mistral": {
+            "api_url": "https://api.mistral.ai/v1/chat/completions",
+            "api_key": "",
+            "model": "devstral-small-2505"
+        }
+    },
     "api_url": "http://localhost:11434/v1/chat/completions",
     "api_key": "",
     "model": "devstral-small-2:latest",
