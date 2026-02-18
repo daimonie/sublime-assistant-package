@@ -53,5 +53,6 @@ def user_block(query: str, hints: list[str] | None = None) -> str:
     return block + "\n"
 
 
-def assistant_header() -> str:
-    return f"## 🤖 Assistant\n{PLACEHOLDER}"
+def assistant_header(preset: str = "") -> str:
+    label = "Assistant" if not preset else f"Assistant ({preset})"
+    return f"## 🤖 {label}\n{PLACEHOLDER}"

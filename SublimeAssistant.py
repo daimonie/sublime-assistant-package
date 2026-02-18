@@ -119,8 +119,10 @@ def _submit_query(
         None: Operations are performed asynchronously via callbacks.
     """
     result = context.build(window, query, active_file, active_filename, selection)
+    settings = sublime.load_settings("SublimeAssistant.sublime-settings")
+    preset = settings.get("active_preset") or ""
     panel.run_command("sublime_assistant_append", {
-        "text": chat_view.user_block(query, result.hints) + chat_view.assistant_header()
+        "text": chat_view.user_block(query, result.hints) + chat_view.assistant_header(preset)
     })
     threading.Thread(
         target=_call_api,
@@ -156,6 +158,20 @@ def _add_apply_phantoms(
 
 
 def _on_apply_navigate(href: str, window: sublime.Window) -> None:
+    """
+    Handle navigation to an "Apply" phantom link in the chat panel.
+
+    When a user clicks an "Apply" link next to a code block in the assistant's response,
+    this function locates or opens the target file (if specified) or uses the active view,
+    then opens a diff view showing the proposed changes.
+
+    Args:
+        href: The hyperlink href string, expected to start with "apply:" followed by a block ID.
+        window: The Sublime Text window where the navigation occurred.
+
+    Returns:
+        None: The diff view is opened asynchronously; no return value.
+    """
     if not href.startswith("apply:"):
         return
 
@@ -278,7 +294,15 @@ class SublimeAssistantSubmitCommand(sublime_plugin.TextCommand):
 
 
 class SublimeAssistantAppendCommand(sublime_plugin.TextCommand):
+    """Append text to the chat panel and ensure it is visible."""
+
     def run(self, edit, text: str):
+        """Insert text at the end of the view and scroll to show it.
+
+        Args:
+            edit: The edit object provided by Sublime Text.
+            text: The text to append to the chat panel.
+        """
         self.view.set_read_only(False)
         self.view.insert(edit, self.view.size(), text)
         self.view.show(self.view.size())

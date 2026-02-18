@@ -2,9 +2,20 @@
 from __future__ import annotations
 
 import json
+import traceback
+import urllib.error
 import urllib.request
 
 _TIMEOUT = 30
+
+
+def _format_request_info(url: str, model: str, messages: list[dict]) -> str:
+    """Summary of what we sent (no sensitive content)."""
+    parts = [f"URL: {url}", f"Model: {model}", f"Messages: {len(messages)}"]
+    if messages:
+        roles = [m.get("role", "?") for m in messages]
+        parts.append(f"Roles: {', '.join(roles)}")
+    return "\n".join(parts)
 
 
 def call(url: str, api_key: str, model: str, messages: list[dict]) -> tuple[str, bool]:
@@ -15,6 +26,7 @@ def call(url: str, api_key: str, model: str, messages: list[dict]) -> tuple[str,
 
     payload = json.dumps({"model": model, "messages": messages, "stream": False}).encode()
     req = urllib.request.Request(url, data=payload, headers=headers, method="POST")
+    request_info = _format_request_info(url, model, messages)
 
     try:
         with urllib.request.urlopen(req, timeout=_TIMEOUT) as response:
@@ -26,5 +38,49 @@ def call(url: str, api_key: str, model: str, messages: list[dict]) -> tuple[str,
             return msg["content"], True
         return "Error: Unexpected API response format.", False
 
+    except urllib.error.HTTPError as e:
+        body = ""
+        try:
+            body = e.read().decode()
+        except Exception:
+            body = "(could not read response body)"
+        err = [
+            "**SublimeAssistant – HTTP error**",
+            "",
+            "**Request:**",
+            request_info,
+            "",
+            f"**Status:** {e.code} {e.reason}",
+            "",
+            "**Response body:**",
+            body,
+        ]
+        return "\n".join(err), False
+
+    except urllib.error.URLError as e:
+        err = [
+            "**SublimeAssistant – connection error**",
+            "",
+            "**Request:**",
+            request_info,
+            "",
+            f"**Error:** {e.reason}",
+        ]
+        if e.args:
+            err.append("")
+            err.append(str(e.args))
+        return "\n".join(err), False
+
     except Exception as e:
-        return f"Error connecting to AI: {e}", False
+        err = [
+            "**SublimeAssistant – unexpected error**",
+            "",
+            "**Request:**",
+            request_info,
+            "",
+            f"**Exception:** {type(e).__name__}: {e}",
+            "",
+            "**Traceback:**",
+            traceback.format_exc(),
+        ]
+        return "\n".join(err), False

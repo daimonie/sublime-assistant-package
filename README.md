@@ -93,14 +93,14 @@ Example:
         "mistral": {
             "api_url": "https://api.mistral.ai/v1/chat/completions",
             "api_key": "YOUR_MISTRAL_API_KEY",
-            "model": "devstral-small-2505"
+            "model": "devstral-2512+2"
         }
     },
     "system_prompt": "You are an expert coding assistant inside Sublime Text. Be concise.\n..."
 }
 ```
 
-**Devstral on Mistral:** The Mistral API offers Devstral as `devstral-small-2505` (same style of coding assistant as the Ollama `devstral-small-2`). Use the **mistral** preset with that model when you want cloud-backed Devstral without running Ollama.
+**Devstral on Mistral:** The Mistral API offers Devstral 2; use model id **`devstral-2512+2`** ([API docs](https://docs.mistral.ai/api)). If you get 400, reload the plugin and check the full error in the chat (request + response body). You can list valid model IDs with `GET https://api.mistral.ai/v1/models` and your API key; a safe fallback in User settings is **`mistral-small-latest`**.
 
 **Switch preset:** Command Palette (`Ctrl+Shift+P`) → **Sublime Assistant: Use preset Local** or **Sublime Assistant: Use preset Mistral**. The status bar shows the active preset.
 
@@ -140,6 +140,12 @@ If you don’t use presets, the top-level keys still work as before:
     "system_prompt": "You are an expert coding assistant inside Sublime Text. Be concise.\nWhen suggesting code changes:\n1. Label every code block with its target file: ```language:path/to/file.ext\n2. Reference exact file names and line numbers.\n3. Flag breaking changes or new dependencies.\n4. For new files, use the full intended relative path."
 }
 ```
+
+### Troubleshooting (e.g. Mistral 400)
+
+- **See the full error:** Reload the plugin (save any file in `SublimeAssistant/assistant/` or restart Sublime). The next failed request will show **Request** (URL, model, message count) and **Response body** in the chat so you can see the server’s reason (e.g. invalid model id, auth, or message format).
+- **Request format:** We send `POST` to your `api_url` with body `{ "model": "...", "messages": [{"role":"system"|"user"|"assistant","content":"..."}, ...], "stream": false }`, matching the [Mistral Chat Completion API](https://docs.mistral.ai/api).
+- **Model IDs:** Use [List models](https://docs.mistral.ai/api/endpoint/models) (`GET https://api.mistral.ai/v1/models`) with your API key to see valid `model` values. If Devstral isn’t available, set `presets.mistral.model` to `mistral-small-latest` in User settings.
 
 ### Code block format
 
