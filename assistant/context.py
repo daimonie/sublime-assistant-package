@@ -6,9 +6,11 @@ from typing import NamedTuple
 
 import sublime
 
+from .api import fetch_url
 from .file_finder import find as find_file
 
 _REF_PATTERN = re.compile(r"@([\w.\-]+\.[\w\-]+)")
+_URL_PATTERN = re.compile(r"https?://[^\s<>\"']+")
 
 
 class ContextResult(NamedTuple):
@@ -38,6 +40,11 @@ def build(
         else:
             parts.append(f"--- REFERENCED FILE: {fname} (NOT FOUND) ---")
             hints.append(f"@{fname} (not found)")
+
+    for url in _URL_PATTERN.findall(query):
+        content, ok = fetch_url(url)
+        parts.append(f"--- FETCHED URL: {url} ---\n{content}")
+        hints.append(f"url:{url}" if ok else f"url:{url} (failed)")
 
     if selection:
         parts.append(f"--- SELECTED CODE ---\n{selection}")

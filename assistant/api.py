@@ -37,15 +37,28 @@ FETCH_URL_TOOL = {
 }
 
 
+_SKIP_TAGS = {"script", "style", "nav", "header", "footer"}
+
+
 def _strip_html(html: str) -> str:
     """Extract plain text from HTML using stdlib only."""
     class _TextExtractor(HTMLParser):
         def __init__(self) -> None:
             super().__init__()
             self.text: list[str] = []
+            self._skip_depth: int = 0
+
+        def handle_starttag(self, tag: str, attrs: list) -> None:
+            if tag.lower() in _SKIP_TAGS:
+                self._skip_depth += 1
+
+        def handle_endtag(self, tag: str) -> None:
+            if tag.lower() in _SKIP_TAGS and self._skip_depth > 0:
+                self._skip_depth -= 1
 
         def handle_data(self, data: str) -> None:
-            self.text.append(data)
+            if self._skip_depth == 0:
+                self.text.append(data)
 
         def get_text(self) -> str:
             return " ".join(self.text).strip()
@@ -59,7 +72,7 @@ def _strip_html(html: str) -> str:
     return re.sub(r"\s+", " ", out).strip()
 
 
-def _fetch_url(url: str) -> tuple[str, bool]:
+def fetch_url(url: str) -> tuple[str, bool]:
     """Fetch a URL and return (text_content_or_error, success)."""
     try:
         req = urllib.request.Request(url, headers={"User-Agent": "SublimeAssistant/1.0"})
@@ -90,7 +103,7 @@ def _run_tool(name: str, arguments: str) -> str:
         url = (args.get("url") or "").strip()
         if not url.startswith("http://") and not url.startswith("https://"):
             return "Error: URL must start with http:// or https://"
-        content, ok = _fetch_url(url)
+        content, ok = fetch_url(url)
         return content
     except json.JSONDecodeError as e:
         return f"Invalid arguments JSON: {e}"
