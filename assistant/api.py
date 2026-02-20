@@ -229,13 +229,13 @@ def call(
         headers["Authorization"] = f"Bearer {api_key}"
 
     timeout = timeout_seconds if timeout_seconds is not None else _TIMEOUT
-    request_info = _format_request_info(url, model, messages)
     current_messages = list(messages)
     rounds = 0
     tools_invoked: list[tuple[str, int]] = []  # (tool_name, result_size_chars)
 
     while rounds < _MAX_TOOL_ROUNDS:
         rounds += 1
+        request_info = _format_request_info(url, model, current_messages)
         result, err_msg, ok = _do_request(
             url, api_key, model, current_messages, tools, headers, request_info, timeout_seconds=timeout
         )
@@ -270,9 +270,9 @@ def call(
             args = fn.get("arguments") or "{}"
             if on_tool_call and name == "fetch_url":
                 try:
-                    url = (json.loads(args).get("url") or "").strip()
-                    if url:
-                        on_tool_call(name, url)
+                    fetch_url_arg = (json.loads(args).get("url") or "").strip()
+                    if fetch_url_arg:
+                        on_tool_call(name, fetch_url_arg)
                 except Exception:
                     on_tool_call(name, args)
             result_text = _run_tool(name, args)
