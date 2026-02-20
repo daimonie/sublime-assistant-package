@@ -1,0 +1,16 @@
+[
+    {
+        "caption": "Sublime Assistant: Set Mistral API key",
+        "command": "sublime_assistant_set_mistral_api_key"
+    },
+    {
+        "caption": "Sublime Assistant: Use preset Local",
+        "command": "sublime_assistant_use_preset",
+        "args": { "preset": "local" }
+    },
+    {
+        "caption": "Sublime Assistant: Use preset Mistral",
+        "command": "sublime_assistant_use_preset",
+        "args": { "preset": "mistral" }
+    }
+]
