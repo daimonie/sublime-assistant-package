@@ -6,11 +6,12 @@ import re
 import socket
 import traceback
 import urllib.error
+import urllib.parse
 import urllib.request
 from html.parser import HTMLParser
 from typing import Callable
 
-_TIMEOUT = 30
+_TIMEOUT = 120
 _FETCH_TIMEOUT = 30
 _MAX_TOOL_ROUNDS = 5
 # Fetched page content is truncated to this many characters. Devstral has 384k context; if you see
@@ -38,6 +39,29 @@ FETCH_URL_TOOL = {
 
 
 _SKIP_TAGS = {"script", "style", "nav", "header", "footer"}
+
+
+def fetch_models(api_url: str, api_key: str) -> tuple[list[str], str]:
+    """Fetch available models from the /v1/models endpoint. Returns (model_ids, error_message)."""
+    parsed = urllib.parse.urlparse(api_url)
+    # Replace path up to and including /v1/ with /v1/models
+    base = parsed._replace(path=re.sub(r"/v1/.*$", "/v1/models", parsed.path))
+    models_url = urllib.parse.urlunparse(base)
+
+    headers = {"Content-Type": "application/json"}
+    if api_key:
+        headers["Authorization"] = f"Bearer {api_key}"
+
+    req = urllib.request.Request(models_url, headers=headers)
+    try:
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            data = json.loads(resp.read().decode())
+        models = [m["id"] for m in (data.get("data") or []) if m.get("id")]
+        if not models:
+            return [], f"No models returned by {models_url}"
+        return sorted(models), ""
+    except Exception as e:
+        return [], f"Error fetching models from {models_url}: {e}"
 
 
 def _strip_html(html: str) -> str:

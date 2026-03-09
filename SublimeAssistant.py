@@ -76,7 +76,7 @@ def _call_api(
     win_id = window.id()
     messages = history.get_messages(win_id, system_prompt) + [{"role": "user", "content": full_content}]
     tools = [api.FETCH_URL_TOOL]
-    request_timeout = max(1, int(settings.get("request_timeout") or 30))
+    request_timeout = max(1, int(settings.get("request_timeout") or 120))
 
     def on_tool_call(tool_name: str, url_or_args: str) -> None:
         if tool_name != "fetch_url":
@@ -133,8 +133,9 @@ def _submit_query(
     result = context.build(window, query, active_file, active_filename, selection)
     settings = sublime.load_settings("SublimeAssistant.sublime-settings")
     preset = settings.get("active_preset") or ""
+    _, _, model, _ = _get_api_config(settings)
     panel.run_command("sublime_assistant_append", {
-        "text": chat_view.user_block(query, result.hints) + chat_view.assistant_header(preset)
+        "text": chat_view.user_block(query, result.hints) + chat_view.assistant_header(preset, model)
     })
     threading.Thread(
         target=_call_api,
@@ -401,6 +402,49 @@ class SublimeAssistantCreateFileCommand(sublime_plugin.WindowCommand):
             return
         self.window.focus_group(0)
         self.window.open_file(filepath)
+
+
+class SublimeAssistantSelectModelCommand(sublime_plugin.WindowCommand):
+    """Fetch available models from the active preset and let the user pick one."""
+
+    def run(self) -> None:
+        settings = sublime.load_settings("SublimeAssistant.sublime-settings")
+        url, api_key, current_model, _ = _get_api_config(settings)
+        sublime.status_message("SublimeAssistant: fetching models...")
+
+        def fetch():
+            models, err = api.fetch_models(url, api_key)
+            sublime.set_timeout(lambda: self._show(settings, models, err, current_model), 0)
+
+        threading.Thread(target=fetch, daemon=True).start()
+
+    def _show(self, settings: sublime.Settings, models: list[str], err: str, current_model: str) -> None:
+        if err:
+            sublime.error_message(f"SublimeAssistant: {err}")
+            return
+
+        try:
+            selected_index = models.index(current_model)
+        except ValueError:
+            selected_index = 0
+
+        def on_done(idx: int) -> None:
+            if idx == -1:
+                return
+            chosen = models[idx]
+            presets = dict(settings.get("presets") or {})
+            active = settings.get("active_preset")
+            if active and active in presets:
+                preset = dict(presets[active])
+                preset["model"] = chosen
+                presets[active] = preset
+                settings.set("presets", presets)
+            else:
+                settings.set("model", chosen)
+            sublime.save_settings("SublimeAssistant.sublime-settings")
+            sublime.status_message(f"SublimeAssistant: model set to «{chosen}»")
+
+        self.window.show_quick_panel(models, on_done, selected_index=selected_index)
 
 
 class SublimeAssistantReloadListener(sublime_plugin.EventListener):

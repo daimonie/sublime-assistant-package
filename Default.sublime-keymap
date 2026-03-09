@@ -9,5 +9,6 @@
         "context": [
             {"key": "setting.sublime_assistant_input", "operator": "equal", "operand": true}
         ]
-    }
+    },
+    { "keys": ["alt+ctrl+r"], "command": "refresh_folder_list" }
 ]

@@ -53,8 +53,13 @@ def user_block(query: str, hints: list[str] | None = None) -> str:
     return block + "\n"
 
 
-def assistant_header(preset: str = "") -> str:
-    label = "Assistant" if not preset else f"Assistant ({preset})"
+def assistant_header(preset: str = "", model: str = "") -> str:
+    if preset and model:
+        label = f"Assistant ({preset}: {model})"
+    elif preset:
+        label = f"Assistant ({preset})"
+    else:
+        label = "Assistant"
     return f"## 🤖 {label}\n{PLACEHOLDER}"
 
 

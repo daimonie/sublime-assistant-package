@@ -4,6 +4,10 @@
         "command": "sublime_assistant_set_mistral_api_key"
     },
     {
+        "caption": "Sublime Assistant: Select Model",
+        "command": "sublime_assistant_select_model"
+    },
+    {
         "caption": "Sublime Assistant: Use preset Local",
         "command": "sublime_assistant_use_preset",
         "args": { "preset": "local" }
