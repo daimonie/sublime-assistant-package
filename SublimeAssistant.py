@@ -7,6 +7,7 @@ import json
 import os
 import sys
 import threading
+import time
 
 import sublime
 import sublime_plugin
@@ -19,6 +20,43 @@ from .assistant import view as chat_view
 # selection_region is [start_line, end_line] (0-indexed, exclusive end)
 _pending_blocks: dict[str, tuple[str, str | None, list[int] | None]] = {}
 _block_counter = itertools.count()
+
+# window_id -> (directory, timestamp) — tracks when the last auto-summary ran
+_summary_state: dict[int, tuple[str, float]] = {}
+
+_DEFAULT_SUMMARY_INTERVAL = 1800  # seconds (30 minutes)
+
+
+def _get_active_dir(window: sublime.Window) -> str | None:
+    """Return the directory to summarize: active file's dir, or first project folder."""
+    editor = window.active_view_in_group(0)
+    if editor:
+        fp = editor.file_name()
+        if fp:
+            return os.path.dirname(fp)
+    folders = window.folders()
+    return folders[0] if folders else None
+
+
+def _auto_summary_context(window: sublime.Window) -> str:
+    """Return a fresh summary string if the current directory hasn't been summarized recently."""
+    settings = sublime.load_settings("SublimeAssistant.sublime-settings")
+    interval = int(settings.get("summary_interval") or _DEFAULT_SUMMARY_INTERVAL)
+
+    target_dir = _get_active_dir(window)
+    if not target_dir:
+        return ""
+
+    win_id = window.id()
+    now = time.time()
+    last_dir, last_time = _summary_state.get(win_id, ("", 0.0))
+
+    if target_dir == last_dir and (now - last_time) < interval:
+        return ""
+
+    summary = summarizer.crawl(target_dir)
+    _summary_state[win_id] = (target_dir, now)
+    return f"--- DIRECTORY SUMMARY ---\n{summary}"
 
 
 def plugin_unloaded() -> None:
@@ -118,6 +156,7 @@ def _call_api(
     request_timeout = max(1, int(settings.get("request_timeout") or 120))
 
     file_requests: list[str] = []
+    url_requests: list[str] = []
 
     def on_read_file(filename: str) -> str | None:
         file_requests.append(filename)
@@ -125,6 +164,7 @@ def _call_api(
 
     def on_tool_call(tool_name: str, url_or_args: str) -> None:
         if tool_name == "fetch_url":
+            url_requests.append(url_or_args)
             display = url_or_args if len(url_or_args) <= 60 else url_or_args[:57] + "..."
             status = f"> _Fetching {display}..._"
         elif tool_name == "read_file":
@@ -139,10 +179,13 @@ def _call_api(
     client = _make_client(url, api_key, model, request_timeout, backend)
     reply, success = client.call(messages, tools=tools, on_tool_call=on_tool_call, on_read_file=on_read_file)
 
+    tool_log_parts: list[str] = []
     if file_requests:
-        file_list = ", ".join(f"`{f}`" for f in file_requests)
-        note = f"_Requested: {file_list}_\n\n"
-        reply = note + reply
+        tool_log_parts.append("read " + ", ".join(f"`{f}`" for f in file_requests))
+    if url_requests:
+        tool_log_parts.append("fetched " + ", ".join(f"`{u}`" for u in url_requests))
+    if tool_log_parts:
+        reply = reply + "\n\n> **Tool calls:** " + " · ".join(tool_log_parts)
 
     if success:
         history.append(win_id, "user", full_content)
@@ -187,7 +230,11 @@ def _submit_query(
     pending_summary = window.settings().get("sa_pending_summary") or ""
     if pending_summary:
         window.settings().erase("sa_pending_summary")
-    result = context.build(window, query, active_file, active_filename, selection, extra_context=pending_summary)
+
+    auto_summary = _auto_summary_context(window)
+    extra = "\n\n".join(filter(None, [auto_summary, pending_summary]))
+
+    result = context.build(window, query, active_file, active_filename, selection, extra_context=extra)
     settings = sublime.load_settings("SublimeAssistant.sublime-settings")
     preset = settings.get("active_preset") or ""
     _, _, model, _, _ = _get_api_config(settings)
@@ -532,33 +579,17 @@ class SublimeAssistantSelectModelCommand(sublime_plugin.WindowCommand):
 
 
 class SublimeAssistantSummarizeDirectoryCommand(sublime_plugin.WindowCommand):
-    """Crawl the current file's directory, show the summary in chat, and stage it for the next query."""
+    """Force-refresh the directory summary; it will be injected automatically on the next query."""
 
     def run(self) -> None:
-        editor = self.window.active_view_in_group(0)
-        target_dir = None
-
-        if editor:
-            file_path = editor.file_name()
-            if file_path:
-                target_dir = os.path.dirname(file_path)
-
-        if not target_dir and self.window.folders():
-            target_dir = self.window.folders()[0]
-
+        target_dir = _get_active_dir(self.window)
         if not target_dir:
             sublime.status_message("SublimeAssistant: no directory to summarize")
             return
 
-        summary = summarizer.crawl(target_dir)
-        panel = chat_view.get_or_create(self.window)
-        if panel:
-            panel.run_command("sublime_assistant_append", {
-                "text": f"\n---\n\n## 📁 Directory Summary\n```\n{summary}\n```\n\n"
-            })
-
-        self.window.settings().set("sa_pending_summary", f"--- DIRECTORY SUMMARY ---\n{summary}")
-        sublime.status_message(f"SublimeAssistant: summarized {os.path.basename(target_dir)}/")
+        # Expire the cached state so _auto_summary_context re-crawls on the next query
+        _summary_state.pop(self.window.id(), None)
+        sublime.status_message(f"SublimeAssistant: summary refreshed for {os.path.basename(target_dir)}/")
 
 
 class SublimeAssistantReloadListener(sublime_plugin.EventListener):
