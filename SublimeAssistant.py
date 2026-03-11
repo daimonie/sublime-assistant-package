@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import importlib
 import itertools
+import json
 import os
 import sys
 import threading
@@ -27,14 +28,44 @@ def plugin_unloaded() -> None:
         del sys.modules[key]
 
 
-def _get_api_config(settings: sublime.Settings) -> tuple[str, str, str, str]:
-    """Resolve api_url, api_key, model, system_prompt from active_preset or top-level."""
-    presets = settings.get("presets") or {}
+def _load_default_presets() -> dict:
+    """Read preset defaults from the package .sublime-settings file.
+
+    Sublime Text does not deep-merge nested objects, so a User settings file that
+    contains only {"presets": {"claude": {"api_key": "..."}}} would lose the
+    package-defined backend/model for that preset.  Reading the package file
+    directly lets us do the merge ourselves.
+    """
+    pkg_path = os.path.join(
+        sublime.packages_path(), "SublimeAssistant", "SublimeAssistant.sublime-settings"
+    )
+    try:
+        with open(pkg_path, encoding="utf-8") as f:
+            return (json.load(f).get("presets") or {})
+    except Exception:
+        return {}
+
+
+def _get_api_config(settings: sublime.Settings) -> tuple[str, str, str, str, str]:
+    """Resolve api_url, api_key, model, system_prompt, backend from active_preset or top-level.
+
+    Per-preset values are deep-merged: package defaults supply backend/model/url,
+    user settings supply api_key (and can override anything else).
+    """
+    default_presets = _load_default_presets()
+    user_presets: dict = settings.get("presets") or {}
+
+    all_names = set(default_presets) | set(user_presets)
+    merged_presets = {
+        name: {**(default_presets.get(name) or {}), **(user_presets.get(name) or {})}
+        for name in all_names
+    }
+
     active = settings.get("active_preset")
-    p = presets.get(active) if active else None
+    p = merged_presets.get(active) if active else None
 
     def _get(key: str, default: str) -> str:
-        if p and isinstance(p, dict) and key in p and p[key] is not None:
+        if p and key in p and p[key] is not None:
             return str(p[key])
         return settings.get(key, default)
 
@@ -42,7 +73,15 @@ def _get_api_config(settings: sublime.Settings) -> tuple[str, str, str, str]:
     api_key = _get("api_key", "")
     model = _get("model", "devstral-small-2:latest")
     system_prompt = settings.get("system_prompt", "You are a helpful coding assistant.")
-    return url, api_key, model, system_prompt
+    backend = _get("backend", "openai")
+    return url, api_key, model, system_prompt, backend
+
+
+def _make_client(url: str, api_key: str, model: str, timeout: int, backend: str) -> api.APIClient:
+    """Instantiate the correct APIClient subclass for the given backend."""
+    if backend == "claude":
+        return api.ClaudeClient(api_key, model, timeout_seconds=timeout)
+    return api.OpenAIClient(url, api_key, model, timeout_seconds=timeout)
 
 
 def _call_api(
@@ -71,7 +110,7 @@ def _call_api(
         None: All operations are performed asynchronously via callbacks.
     """
     settings = sublime.load_settings("SublimeAssistant.sublime-settings")
-    url, api_key, model, system_prompt = _get_api_config(settings)
+    url, api_key, model, system_prompt, backend = _get_api_config(settings)
 
     win_id = window.id()
     messages = history.get_messages(win_id, system_prompt) + [{"role": "user", "content": full_content}]
@@ -88,7 +127,8 @@ def _call_api(
             0,
         )
 
-    reply, success = api.call(url, api_key, model, messages, tools=tools, on_tool_call=on_tool_call, timeout_seconds=request_timeout)
+    client = _make_client(url, api_key, model, request_timeout, backend)
+    reply, success = client.call(messages, tools=tools, on_tool_call=on_tool_call)
 
     if success:
         history.append(win_id, "user", full_content)
@@ -133,7 +173,7 @@ def _submit_query(
     result = context.build(window, query, active_file, active_filename, selection)
     settings = sublime.load_settings("SublimeAssistant.sublime-settings")
     preset = settings.get("active_preset") or ""
-    _, _, model, _ = _get_api_config(settings)
+    _, _, model, _, _ = _get_api_config(settings)
     panel.run_command("sublime_assistant_append", {
         "text": chat_view.user_block(query, result.hints) + chat_view.assistant_header(preset, model)
     })
@@ -267,6 +307,32 @@ class SublimeAssistantSetMistralApiKeyCommand(sublime_plugin.WindowCommand):
 
         self.window.show_input_panel(
             "Mistral API key:",
+            initial,
+            on_done,
+            None,
+            None,
+        )
+
+
+class SublimeAssistantSetClaudeApiKeyCommand(sublime_plugin.WindowCommand):
+    """Prompt for the Claude API key and save it to User settings."""
+
+    def run(self) -> None:
+        settings = sublime.load_settings("SublimeAssistant.sublime-settings")
+        presets = dict(settings.get("presets") or {})
+        claude = dict(presets.get("claude") or {})
+        initial = claude.get("api_key") or ""
+
+        def on_done(key: str) -> None:
+            key = key.strip()
+            claude["api_key"] = key
+            presets["claude"] = claude
+            settings.set("presets", presets)
+            sublime.save_settings("SublimeAssistant.sublime-settings")
+            sublime.status_message("SublimeAssistant: Claude API key saved to User settings.")
+
+        self.window.show_input_panel(
+            "Claude API key:",
             initial,
             on_done,
             None,
@@ -409,11 +475,12 @@ class SublimeAssistantSelectModelCommand(sublime_plugin.WindowCommand):
 
     def run(self) -> None:
         settings = sublime.load_settings("SublimeAssistant.sublime-settings")
-        url, api_key, current_model, _ = _get_api_config(settings)
+        url, api_key, current_model, _, backend = _get_api_config(settings)
         sublime.status_message("SublimeAssistant: fetching models...")
 
         def fetch():
-            models, err = api.fetch_models(url, api_key)
+            client = _make_client(url, api_key, current_model, 10, backend)
+            models, err = client.fetch_models()
             sublime.set_timeout(lambda: self._show(settings, models, err, current_model), 0)
 
         threading.Thread(target=fetch, daemon=True).start()

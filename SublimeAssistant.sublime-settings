@@ -10,6 +10,11 @@
             "api_url": "https://api.mistral.ai/v1/chat/completions",
             "api_key": "",
             "model": "devstral-latest"
+        },
+        "claude": {
+            "backend": "claude",
+            "api_key": "",
+            "model": "claude-sonnet-4-6"
         }
     },
     "api_url": "http://localhost:11434/v1/chat/completions",

@@ -2,7 +2,7 @@
 
 **SublimeAssistant** brings Cursor-like AI interaction directly into **Sublime Text 4**.
 
-It connects your editor to a local LLM (via Ollama) or the Mistral API, giving you a persistent
+It connects your editor to a local LLM (via Ollama), the Mistral API, or the Claude (Anthropic) API, giving you a persistent
 chat panel, file referencing, and one-click code application with diff preview — without ever
 leaving the keyboard. Lightweight, thread-safe, and runs on Python 3.8 with no external dependencies.
 
@@ -19,7 +19,7 @@ leaving the keyboard. Lightweight, thread-safe, and runs on Python 3.8 with no e
 - **Apply with diff preview** — Every code block the assistant produces gets an **Apply** button. Clicking it opens a unified diff preview where you can **Accept** or **Reject** the change before anything is written to disk.
 - **New file creation** — When the LLM suggests a brand-new file, the Apply workflow lets you review and create it with one click.
 - **Fetch URL tool** — When you ask to read or check a web page, the assistant fetches it and includes the content in context automatically. Works with both the local and Mistral presets. Fetched content is truncated to 80 k characters. If you see "truncating input prompt" in Ollama logs, raise Ollama's context limit (e.g. `OLLAMA_NUM_CTX=32768`; Devstral supports up to 384 k).
-- **Preset switching** — Switch between a local Ollama endpoint and the Mistral API from the Command Palette without touching config files.
+- **Preset switching** — Switch between a local Ollama endpoint, the Mistral API, or the Claude API from the Command Palette without touching config files.
 - **Auto-reload on save** — When you edit any file in `SublimeAssistant/assistant/`, the submodule is hot-reloaded automatically. No need to restart Sublime Text during development.
 - **Asynchronous** — API calls run in a background thread; the editor never freezes.
 
@@ -43,7 +43,8 @@ If you do not have a suitable GPU, **use the Mistral API preset instead** — it
 - **Python 3.8** (bundled with Sublime Text 4 — no extra install needed)
 - No external Python packages required (uses stdlib only)
 - **For local hosting:** Ollama installed and running, with a compatible model pulled (see above)
-- **For cloud:** A [Mistral API key](https://console.mistral.ai/)
+- **For Mistral cloud:** A [Mistral API key](https://console.mistral.ai/)
+- **For Claude cloud:** An [Anthropic API key](https://console.anthropic.com/) (see [Getting a Claude API key](#getting-a-claude-api-key))
 
 ### Local setup (Ollama)
 
@@ -74,7 +75,7 @@ git clone https://github.com/YOUR_USERNAME/SublimeAssistant.git
 ```
 
 Restart Sublime Text. No further setup is needed for local Ollama use.
-For Mistral API use, set your API key via the Command Palette after restarting (see below).
+For Mistral or Claude API use, set your API key via the Command Palette after restarting (see below).
 
 ---
 
@@ -90,7 +91,10 @@ For Mistral API use, set your API key via the Command Palette after restarting (
 | Reject diff | Click **✗ Reject** in the diff preview |
 | Switch to local (Ollama) | Command Palette → **Sublime Assistant: Use preset Local** |
 | Switch to Mistral API | Command Palette → **Sublime Assistant: Use preset Mistral** |
+| Switch to Claude API | Command Palette → **Sublime Assistant: Use preset Claude** |
 | Set Mistral API key | Command Palette → **Sublime Assistant: Set Mistral API key** |
+| Set Claude API key | Command Palette → **Sublime Assistant: Set Claude API key** |
+| Select model (any preset) | Command Palette → **Sublime Assistant: Select Model** |
 
 ---
 
@@ -100,12 +104,16 @@ Edit `SublimeAssistant.sublime-settings` (or create a User override in `Packages
 
 ### Settings reference
 
-- **`active_preset`** — Which preset is used: `"local"` or `"mistral"` (or any custom name).
-- **`presets`** — Map of preset names to `api_url`, `api_key`, and `model`.
-- **`request_timeout`** — Timeout in seconds for an AI request (default 30). Increase to 60–120 when using fetch_url or with slow token generation.
+- **`active_preset`** — Which preset is used: `"local"`, `"mistral"`, `"claude"`, or any custom name.
+- **`presets`** — Map of preset names to connection settings. Each preset supports:
+  - `api_url` — Full chat completions endpoint (OpenAI-compatible backends).
+  - `api_key` — API key for the backend.
+  - `model` — Model ID to use.
+  - `backend` — `"openai"` (default, covers Ollama/Mistral/LM Studio) or `"claude"` (Anthropic).
+- **`request_timeout`** — Timeout in seconds for an AI request (default 120). Increase when using fetch_url or with slow token generation.
 - **`system_prompt`** — Instructions prepended to every conversation.
 
-Top-level `api_url` / `api_key` / `model` are used as fallbacks when no preset is active or when a preset omits a key.
+Top-level `api_url` / `api_key` / `model` are used as fallbacks when no preset is active or when a preset omits a key. The `backend` key is only meaningful inside a preset.
 
 ### Example
 
@@ -123,23 +131,41 @@ Top-level `api_url` / `api_key` / `model` are used as fallbacks when no preset i
             "api_url": "https://api.mistral.ai/v1/chat/completions",
             "api_key": "YOUR_MISTRAL_API_KEY",
             "model": "devstral-latest"
+        },
+        "claude": {
+            "backend": "claude",
+            "api_key": "YOUR_ANTHROPIC_API_KEY",
+            "model": "claude-sonnet-4-6"
         }
     },
     "system_prompt": "You are an expert coding assistant inside Sublime Text. Be concise.\n..."
 }
 ```
 
-**Mistral model IDs:** Use `devstral-latest` for the latest Devstral, or `mistral-small-latest` as a lighter fallback. You can list all valid IDs with `GET https://api.mistral.ai/v1/models` using your API key.
+**Mistral model IDs:** Use `devstral-latest` for the latest Devstral, or `mistral-small-latest` as a lighter fallback.
 
-**Switch preset:** Command Palette (`Ctrl+Shift+P`) → **Sublime Assistant: Use preset Local** or **Sublime Assistant: Use preset Mistral**.
+**Claude model IDs:** Use `claude-sonnet-4-6` (balanced), `claude-opus-4-6` (most capable), or `claude-haiku-4-5-20251001` (fastest/cheapest). Use **Sublime Assistant: Select Model** in the Command Palette to browse all available models.
 
-### Storing the API key securely
+**Switch preset:** Command Palette (`Ctrl+Shift+P`) → **Sublime Assistant: Use preset Local**, **Use preset Mistral**, or **Use preset Claude**.
 
-Keep your Mistral API key out of the plugin folder (and out of version control) by storing it in **User settings**.
+### Getting a Claude API key
+
+1. Go to [console.anthropic.com](https://console.anthropic.com) and sign up or log in.
+2. In the left sidebar, click **API Keys**.
+3. Click **Create Key**, give it a name (e.g. `SublimeAssistant`), and confirm.
+4. **Copy the key immediately** — it is only shown once.
+5. Paste it into Sublime Text via `Ctrl+Shift+P` → **Sublime Assistant: Set Claude API key**.
+
+Claude API usage is billed per token. See [Anthropic's pricing page](https://www.anthropic.com/pricing) for current rates.
+
+### Storing API keys securely
+
+Keep API keys out of the plugin folder (and out of version control) by storing them in **User settings**.
 
 **Option A — Command Palette (recommended)**
-1. `Ctrl+Shift+P` → **Sublime Assistant: Set Mistral API key**
-2. Paste your key and press Enter.
+
+- For Mistral: `Ctrl+Shift+P` → **Sublime Assistant: Set Mistral API key** → paste key → Enter.
+- For Claude: `Ctrl+Shift+P` → **Sublime Assistant: Set Claude API key** → paste key → Enter.
 
 The key is written to your User settings file; the package file is not modified.
 
@@ -152,12 +178,15 @@ Create or open `Packages/User/SublimeAssistant.sublime-settings`:
     "presets": {
         "mistral": {
             "api_key": "your-mistral-api-key-here"
+        },
+        "claude": {
+            "api_key": "your-anthropic-api-key-here"
         }
     }
 }
 ```
 
-Sublime merges this over the package defaults, so only `api_key` is overridden; `api_url` and `model` stay as defined in the package.
+Sublime merges this over the package defaults, so only `api_key` is overridden; all other preset fields stay as defined in the package.
 
 ### Legacy single-endpoint config
 
@@ -204,7 +233,7 @@ SublimeAssistant/
 ├── Default.sublime-keymap     # Ctrl+L, Ctrl+Enter
 ├── .python-version            # Python 3.8
 └── assistant/
-    ├── api.py                 # HTTP client (OpenAI-compatible), tool call loop
+    ├── api.py                 # APIClient base class; OpenAIClient + ClaudeClient, tool call loop
     ├── code_extractor.py      # Parse fenced code blocks from replies
     ├── context.py             # Build LLM context block from file/selection/@refs
     ├── diff_view.py           # Diff preview + new-file preview management

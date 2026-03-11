@@ -1,6 +1,7 @@
 """OpenAI-compatible HTTP API client."""
 from __future__ import annotations
 
+import abc
 import json
 import re
 import socket
@@ -322,3 +323,241 @@ def call(
 
     summary = _format_tool_summary(tools_invoked)
     return "Error: Max tool rounds reached." + "\n\n" + summary, False
+
+
+CLAUDE_API_URL = "https://api.anthropic.com/v1/messages"
+_CLAUDE_MODELS_URL = "https://api.anthropic.com/v1/models"
+_ANTHROPIC_VERSION = "2023-06-01"
+
+
+def _openai_tools_to_claude(tools: list[dict]) -> list[dict]:
+    """Convert OpenAI-format tool definitions to Anthropic format."""
+    result = []
+    for t in tools:
+        fn = t.get("function") or {}
+        result.append({
+            "name": fn.get("name", ""),
+            "description": fn.get("description", ""),
+            "input_schema": fn.get("parameters") or {"type": "object", "properties": {}},
+        })
+    return result
+
+
+def _openai_messages_to_claude(messages: list[dict]) -> tuple[str, list[dict]]:
+    """Split OpenAI-format messages into (system_prompt, claude_messages).
+    Converts tool messages and assistant tool_calls to Claude content-block format."""
+    system = ""
+    claude_msgs: list[dict] = []
+    for msg in messages:
+        role = msg.get("role", "")
+        if role == "system":
+            system = msg.get("content") or ""
+            continue
+        if role == "tool":
+            claude_msgs.append({
+                "role": "user",
+                "content": [{
+                    "type": "tool_result",
+                    "tool_use_id": msg.get("tool_call_id", ""),
+                    "content": msg.get("content", ""),
+                }],
+            })
+            continue
+        if role == "assistant":
+            blocks: list[dict] = []
+            text = msg.get("content")
+            if text:
+                blocks.append({"type": "text", "text": text})
+            for tc in msg.get("tool_calls") or []:
+                fn = tc.get("function") or {}
+                try:
+                    inp = json.loads(fn.get("arguments") or "{}")
+                except json.JSONDecodeError:
+                    inp = {}
+                blocks.append({
+                    "type": "tool_use",
+                    "id": tc.get("id", ""),
+                    "name": fn.get("name", ""),
+                    "input": inp,
+                })
+            claude_msgs.append({"role": "assistant", "content": blocks or (msg.get("content") or "")})
+            continue
+        claude_msgs.append({"role": role, "content": msg.get("content") or ""})
+    return system, claude_msgs
+
+
+class APIClient(abc.ABC):
+    """Abstract base class for AI API clients.
+
+    Subclass this to support new backends (e.g. native Anthropic, Gemini, etc.).
+    The two methods every backend must implement are :meth:`fetch_models` and :meth:`call`.
+    """
+
+    @abc.abstractmethod
+    def fetch_models(self) -> tuple[list[str], str]:
+        """Return (sorted_model_ids, error_message). Empty error means success."""
+        ...
+
+    @abc.abstractmethod
+    def call(
+        self,
+        messages: list[dict],
+        tools: list[dict] | None = None,
+        on_tool_call: Callable[[str, str], None] | None = None,
+    ) -> tuple[str, bool]:
+        """Send *messages* to the backend and return (reply_text, success)."""
+        ...
+
+
+class OpenAIClient(APIClient):
+    """Client for OpenAI-compatible endpoints (Ollama, Mistral, LM Studio, …)."""
+
+    def __init__(self, url: str, api_key: str, model: str, timeout_seconds: int = _TIMEOUT) -> None:
+        self.url = url
+        self.api_key = api_key
+        self.model = model
+        self.timeout_seconds = timeout_seconds
+
+    def fetch_models(self) -> tuple[list[str], str]:
+        return fetch_models(self.url, self.api_key)
+
+    def call(
+        self,
+        messages: list[dict],
+        tools: list[dict] | None = None,
+        on_tool_call: Callable[[str, str], None] | None = None,
+    ) -> tuple[str, bool]:
+        return call(
+            self.url,
+            self.api_key,
+            self.model,
+            messages,
+            tools=tools,
+            on_tool_call=on_tool_call,
+            timeout_seconds=self.timeout_seconds,
+        )
+
+
+class ClaudeClient(APIClient):
+    """Client for the Anthropic Claude Messages API."""
+
+    def __init__(self, api_key: str, model: str, timeout_seconds: int = _TIMEOUT) -> None:
+        self.api_key = api_key
+        self.model = model
+        self.timeout_seconds = timeout_seconds
+
+    def fetch_models(self) -> tuple[list[str], str]:
+        headers = {
+            "x-api-key": self.api_key,
+            "anthropic-version": _ANTHROPIC_VERSION,
+        }
+        req = urllib.request.Request(_CLAUDE_MODELS_URL, headers=headers)
+        try:
+            with urllib.request.urlopen(req, timeout=10) as resp:
+                data = json.loads(resp.read().decode())
+            models = [m["id"] for m in (data.get("data") or []) if m.get("id")]
+            if not models:
+                return [], f"No models returned by {_CLAUDE_MODELS_URL}"
+            return sorted(models), ""
+        except Exception as e:
+            return [], f"Error fetching models from {_CLAUDE_MODELS_URL}: {e}"
+
+    def call(
+        self,
+        messages: list[dict],
+        tools: list[dict] | None = None,
+        on_tool_call: Callable[[str, str], None] | None = None,
+    ) -> tuple[str, bool]:
+        headers = {
+            "Content-Type": "application/json",
+            "x-api-key": self.api_key,
+            "anthropic-version": _ANTHROPIC_VERSION,
+        }
+        system, current_messages = _openai_messages_to_claude(messages)
+        claude_tools = _openai_tools_to_claude(tools) if tools else None
+        tools_invoked: list[tuple[str, int]] = []
+        rounds = 0
+        request_info = f"URL: {CLAUDE_API_URL}\nModel: {self.model}\nMessages: {len(messages)}"
+
+        while rounds < _MAX_TOOL_ROUNDS:
+            rounds += 1
+            body: dict = {
+                "model": self.model,
+                "max_tokens": 8096,
+                "messages": current_messages,
+            }
+            if system:
+                body["system"] = system
+            if claude_tools:
+                body["tools"] = claude_tools
+
+            payload = json.dumps(body).encode()
+            req = urllib.request.Request(CLAUDE_API_URL, data=payload, headers=headers, method="POST")
+            try:
+                with urllib.request.urlopen(req, timeout=self.timeout_seconds) as response:
+                    result = json.loads(response.read().decode())
+            except (socket.timeout, TimeoutError):
+                summary = _format_tool_summary(tools_invoked)
+                err = "\n".join([
+                    "**SublimeAssistant – request timed out**", "",
+                    "**Request:**", request_info, "",
+                    f"The request timed out after {self.timeout_seconds} seconds.",
+                ])
+                return err + "\n\n" + summary, False
+            except urllib.error.HTTPError as e:
+                body_text = ""
+                try:
+                    body_text = e.read().decode()
+                except Exception:
+                    body_text = "(could not read response body)"
+                summary = _format_tool_summary(tools_invoked)
+                err = "\n".join([
+                    "**SublimeAssistant – HTTP error**", "",
+                    "**Request:**", request_info, "",
+                    f"**Status:** {e.code} {e.reason}", "",
+                    "**Response body:**", body_text,
+                ])
+                return err + "\n\n" + summary, False
+            except Exception as e:
+                summary = _format_tool_summary(tools_invoked)
+                err = "\n".join([
+                    "**SublimeAssistant – unexpected error**", "",
+                    "**Request:**", request_info, "",
+                    f"**Exception:** {type(e).__name__}: {e}", "",
+                    "**Traceback:**", traceback.format_exc(),
+                ])
+                return err + "\n\n" + summary, False
+
+            stop_reason = result.get("stop_reason")
+            content_blocks = result.get("content") or []
+
+            if stop_reason != "tool_use":
+                text = " ".join(
+                    b.get("text", "") for b in content_blocks if b.get("type") == "text"
+                ).strip()
+                return text if text else "Error: Empty assistant response.", True
+
+            # Tool use round: append assistant turn, then run tools and send results
+            current_messages.append({"role": "assistant", "content": content_blocks})
+            tool_results = []
+            for block in content_blocks:
+                if block.get("type") != "tool_use":
+                    continue
+                name = block.get("name", "")
+                tool_use_id = block.get("id", "")
+                inp = block.get("input") or {}
+                if on_tool_call and name == "fetch_url":
+                    url_arg = (inp.get("url") or "").strip()
+                    if url_arg:
+                        on_tool_call(name, url_arg)
+                result_text = _run_tool(name, json.dumps(inp))
+                tools_invoked.append((name, len(result_text)))
+                tool_results.append({
+                    "type": "tool_result",
+                    "tool_use_id": tool_use_id,
+                    "content": result_text,
+                })
+            current_messages.append({"role": "user", "content": tool_results})
+
+        summary = _format_tool_summary(tools_invoked)
+        return "Error: Max tool rounds reached.\n\n" + summary, False
