@@ -11,7 +11,7 @@ import threading
 import sublime
 import sublime_plugin
 
-from .assistant import api, code_extractor, context, history, input_view
+from .assistant import api, code_extractor, context, file_finder, history, input_view, summarizer
 from .assistant import diff_view as diff_mgr
 from .assistant import view as chat_view
 
@@ -114,21 +114,35 @@ def _call_api(
 
     win_id = window.id()
     messages = history.get_messages(win_id, system_prompt) + [{"role": "user", "content": full_content}]
-    tools = [api.FETCH_URL_TOOL]
+    tools = [api.FETCH_URL_TOOL, api.READ_FILE_TOOL]
     request_timeout = max(1, int(settings.get("request_timeout") or 120))
 
+    file_requests: list[str] = []
+
+    def on_read_file(filename: str) -> str | None:
+        file_requests.append(filename)
+        return file_finder.find(window, filename)
+
     def on_tool_call(tool_name: str, url_or_args: str) -> None:
-        if tool_name != "fetch_url":
+        if tool_name == "fetch_url":
+            display = url_or_args if len(url_or_args) <= 60 else url_or_args[:57] + "..."
+            status = f"> _Fetching {display}..._"
+        elif tool_name == "read_file":
+            status = f"> _Reading {url_or_args}..._"
+        else:
             return
-        display_url = url_or_args if len(url_or_args) <= 60 else url_or_args[:57] + "..."
-        status = f"> _Fetching {display_url}..._"
         sublime.set_timeout(
             lambda: panel.run_command("sublime_assistant_update_placeholder", {"text": status}),
             0,
         )
 
     client = _make_client(url, api_key, model, request_timeout, backend)
-    reply, success = client.call(messages, tools=tools, on_tool_call=on_tool_call)
+    reply, success = client.call(messages, tools=tools, on_tool_call=on_tool_call, on_read_file=on_read_file)
+
+    if file_requests:
+        file_list = ", ".join(f"`{f}`" for f in file_requests)
+        note = f"_Requested: {file_list}_\n\n"
+        reply = note + reply
 
     if success:
         history.append(win_id, "user", full_content)
@@ -170,7 +184,10 @@ def _submit_query(
     Returns:
         None: Operations are performed asynchronously via callbacks.
     """
-    result = context.build(window, query, active_file, active_filename, selection)
+    pending_summary = window.settings().get("sa_pending_summary") or ""
+    if pending_summary:
+        window.settings().erase("sa_pending_summary")
+    result = context.build(window, query, active_file, active_filename, selection, extra_context=pending_summary)
     settings = sublime.load_settings("SublimeAssistant.sublime-settings")
     preset = settings.get("active_preset") or ""
     _, _, model, _, _ = _get_api_config(settings)
@@ -512,6 +529,36 @@ class SublimeAssistantSelectModelCommand(sublime_plugin.WindowCommand):
             sublime.status_message(f"SublimeAssistant: model set to «{chosen}»")
 
         self.window.show_quick_panel(models, on_done, selected_index=selected_index)
+
+
+class SublimeAssistantSummarizeDirectoryCommand(sublime_plugin.WindowCommand):
+    """Crawl the current file's directory, show the summary in chat, and stage it for the next query."""
+
+    def run(self) -> None:
+        editor = self.window.active_view_in_group(0)
+        target_dir = None
+
+        if editor:
+            file_path = editor.file_name()
+            if file_path:
+                target_dir = os.path.dirname(file_path)
+
+        if not target_dir and self.window.folders():
+            target_dir = self.window.folders()[0]
+
+        if not target_dir:
+            sublime.status_message("SublimeAssistant: no directory to summarize")
+            return
+
+        summary = summarizer.crawl(target_dir)
+        panel = chat_view.get_or_create(self.window)
+        if panel:
+            panel.run_command("sublime_assistant_append", {
+                "text": f"\n---\n\n## 📁 Directory Summary\n```\n{summary}\n```\n\n"
+            })
+
+        self.window.settings().set("sa_pending_summary", f"--- DIRECTORY SUMMARY ---\n{summary}")
+        sublime.status_message(f"SublimeAssistant: summarized {os.path.basename(target_dir)}/")
 
 
 class SublimeAssistantReloadListener(sublime_plugin.EventListener):

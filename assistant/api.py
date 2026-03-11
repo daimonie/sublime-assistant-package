@@ -20,6 +20,28 @@ _MAX_TOOL_ROUNDS = 5
 _MAX_FETCH_CHARS = 80_000
 
 
+READ_FILE_TOOL = {
+    "type": "function",
+    "function": {
+        "name": "read_file",
+        "description": (
+            "Read the full content of a project file for additional context. "
+            "Use when you need to inspect a file referenced by imports, @mentions, "
+            "or described in the conversation."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "filename": {
+                    "type": "string",
+                    "description": "Filename or relative path (e.g. 'api.py' or 'assistant/api.py')",
+                }
+            },
+            "required": ["filename"],
+        },
+    },
+}
+
 FETCH_URL_TOOL = {
     "type": "function",
     "function": {
@@ -257,6 +279,7 @@ def call(
     messages: list[dict],
     tools: list[dict] | None = None,
     on_tool_call: Callable[[str, str], None] | None = None,
+    on_read_file: Callable[[str], str | None] | None = None,
     timeout_seconds: int | None = None,
 ) -> tuple[str, bool]:
     """Send messages to the API; if the model returns tool_calls, run them and continue. Returns (reply_text, success).
@@ -313,7 +336,17 @@ def call(
                         on_tool_call(name, fetch_url_arg)
                 except Exception:
                     on_tool_call(name, args)
-            result_text = _run_tool(name, args)
+            if name == "read_file" and on_read_file:
+                try:
+                    fname = (json.loads(args).get("filename") or "").strip()
+                    if on_tool_call and fname:
+                        on_tool_call(name, fname)
+                    content = on_read_file(fname) if fname else None
+                    result_text = content if content is not None else f"File not found: {fname}"
+                except Exception as e:
+                    result_text = f"Error reading file: {e}"
+            else:
+                result_text = _run_tool(name, args)
             tools_invoked.append((name, len(result_text)))
             current_messages.append({
                 "role": "tool",
@@ -404,6 +437,7 @@ class APIClient(abc.ABC):
         messages: list[dict],
         tools: list[dict] | None = None,
         on_tool_call: Callable[[str, str], None] | None = None,
+        on_read_file: Callable[[str], str | None] | None = None,
     ) -> tuple[str, bool]:
         """Send *messages* to the backend and return (reply_text, success)."""
         ...
@@ -426,6 +460,7 @@ class OpenAIClient(APIClient):
         messages: list[dict],
         tools: list[dict] | None = None,
         on_tool_call: Callable[[str, str], None] | None = None,
+        on_read_file: Callable[[str], str | None] | None = None,
     ) -> tuple[str, bool]:
         return call(
             self.url,
@@ -434,6 +469,7 @@ class OpenAIClient(APIClient):
             messages,
             tools=tools,
             on_tool_call=on_tool_call,
+            on_read_file=on_read_file,
             timeout_seconds=self.timeout_seconds,
         )
 
@@ -467,6 +503,7 @@ class ClaudeClient(APIClient):
         messages: list[dict],
         tools: list[dict] | None = None,
         on_tool_call: Callable[[str, str], None] | None = None,
+        on_read_file: Callable[[str], str | None] | None = None,
     ) -> tuple[str, bool]:
         headers = {
             "Content-Type": "application/json",
@@ -550,7 +587,14 @@ class ClaudeClient(APIClient):
                     url_arg = (inp.get("url") or "").strip()
                     if url_arg:
                         on_tool_call(name, url_arg)
-                result_text = _run_tool(name, json.dumps(inp))
+                if name == "read_file" and on_read_file:
+                    fname = (inp.get("filename") or "").strip()
+                    if on_tool_call and fname:
+                        on_tool_call(name, fname)
+                    content = on_read_file(fname) if fname else None
+                    result_text = content if content is not None else f"File not found: {fname}"
+                else:
+                    result_text = _run_tool(name, json.dumps(inp))
                 tools_invoked.append((name, len(result_text)))
                 tool_results.append({
                     "type": "tool_result",

@@ -24,10 +24,15 @@ def build(
     active_file: str,
     active_filename: str,
     selection: str,
+    extra_context: str = "",
 ) -> ContextResult:
     """Assemble the full user message content and collect UI hints."""
     parts: list[str] = []
     hints: list[str] = []
+
+    if extra_context:
+        parts.append(extra_context)
+        hints.append("dir-summary")
 
     if active_file:
         parts.append(f"--- ACTIVE FILE ({active_filename}) ---\n{active_file}")

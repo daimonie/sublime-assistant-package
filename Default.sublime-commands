@@ -25,5 +25,9 @@
         "caption": "Sublime Assistant: Use preset Claude",
         "command": "sublime_assistant_use_preset",
         "args": { "preset": "claude" }
+    },
+    {
+        "caption": "Sublime Assistant: Summarize Directory",
+        "command": "sublime_assistant_summarize_directory"
     }
 ]

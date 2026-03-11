@@ -19,6 +19,8 @@ leaving the keyboard. Lightweight, thread-safe, and runs on Python 3.8 with no e
 - **Apply with diff preview** — Every code block the assistant produces gets an **Apply** button. Clicking it opens a unified diff preview where you can **Accept** or **Reject** the change before anything is written to disk.
 - **New file creation** — When the LLM suggests a brand-new file, the Apply workflow lets you review and create it with one click.
 - **Fetch URL tool** — When you ask to read or check a web page, the assistant fetches it and includes the content in context automatically. Works with both the local and Mistral presets. Fetched content is truncated to 80 k characters. If you see "truncating input prompt" in Ollama logs, raise Ollama's context limit (e.g. `OLLAMA_NUM_CTX=32768`; Devstral supports up to 384 k).
+- **Directory summary** — Run **Sublime Assistant: Summarize Directory** from the Command Palette to crawl the current file's directory, display a structured list of files and their top-level definitions in the chat panel, and automatically include it as context in your next query.
+- **Assistant file requests** — The assistant can request additional project files mid-conversation (e.g. after spotting an import). The chat panel shows which files were fetched (e.g. `_Requested: \`assistant/api.py\`_`) so you always know what context was provided.
 - **Preset switching** — Switch between a local Ollama endpoint, the Mistral API, or the Claude API from the Command Palette without touching config files.
 - **Auto-reload on save** — When you edit any file in `SublimeAssistant/assistant/`, the submodule is hot-reloaded automatically. No need to restart Sublime Text during development.
 - **Asynchronous** — API calls run in a background thread; the editor never freezes.
@@ -65,7 +67,8 @@ Clone into your Sublime Text `Packages` folder:
 
 | OS      | Path |
 |---------|------|
-| Windows | `%APPDATA%\Sublime Text\Packages\` |
+| Windows (installed) | `%APPDATA%\Sublime Text\Packages\` |
+| Windows (portable)  | `<Sublime Text portable folder>\Data\Packages\` |
 | macOS   | `~/Library/Application Support/Sublime Text/Packages/` |
 | Linux   | `~/.config/sublime-text/Packages/` |
 
@@ -95,6 +98,7 @@ For Mistral or Claude API use, set your API key via the Command Palette after re
 | Set Mistral API key | Command Palette → **Sublime Assistant: Set Mistral API key** |
 | Set Claude API key | Command Palette → **Sublime Assistant: Set Claude API key** |
 | Select model (any preset) | Command Palette → **Sublime Assistant: Select Model** |
+| Summarize current directory | Command Palette → **Sublime Assistant: Summarize Directory** |
 
 ---
 
@@ -240,6 +244,7 @@ SublimeAssistant/
     ├── file_finder.py         # Locate files across open tabs and project folders
     ├── history.py             # Per-window conversation history
     ├── input_view.py          # Input area view (bottom-right strip)
+    ├── summarizer.py          # Crawl a directory and produce a code-structure summary
     └── view.py                # Chat panel UI helpers
 ```
 
