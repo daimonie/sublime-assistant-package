@@ -49,61 +49,28 @@ def _parse_bases(raw: str) -> str:
     return ", ".join(b.strip() for b in raw.split(",") if b.strip())
 
 
-def crawl(root: str) -> tuple[str, dict[str, str]]:
-    """Return (summary_text, {rel_path: content}) for code files under root."""
-    root = os.path.abspath(root)
-    lines: list[str] = [f"# {os.path.basename(root)}/"]
+def crawl(target_dir: str) -> tuple[str, dict[str, str]]:
+    """Crawl the directory and generate a summary, stopping at .git boundaries."""
     file_contents: dict[str, str] = {}
-    found_any = False
+    summary_lines: list[str] = []
 
-    for dirpath, dirnames, filenames in os.walk(root):
-        dirnames[:] = sorted(d for d in dirnames if d not in _IGNORE_DIRS and not d.startswith("."))
-        for fname in sorted(filenames):
-            ext = os.path.splitext(fname)[1].lower()
-            if ext not in _CODE_EXTS:
-                continue
-            fpath = os.path.join(dirpath, fname)
-            rel = os.path.relpath(fpath, root)
-            if os.path.getsize(fpath) > _MAX_FILE_BYTES:
-                continue
-            found_any = True
-            try:
-                with open(fpath, encoding="utf-8") as f:
-                    src = f.read()
-            except Exception:
-                lines.append(f"{rel}: (unreadable)")
-                continue
+    def _crawl_directory(directory: str) -> None:
+        with os.scandir(directory) as entries:
+            for entry in entries:
+                if entry.is_dir():
+                    if entry.name == ".git":
+                        continue  # Skip .git directory
+                    _crawl_directory(entry.path)  # Recurse into subdirectory
+                elif entry.is_file() and os.path.splitext(entry.name)[1] in _CODE_EXTS:
+                    rel_path = os.path.relpath(entry.path, target_dir)
+                    try:
+                        with open(entry.path, "r", encoding="utf-8") as f:
+                            content = f.read()
+                            file_contents[rel_path] = content
+                            summary_lines.append(rel_path)
+                    except Exception:
+                        continue
 
-            file_contents[rel] = src
-
-            doc = _extract_docstring(src)
-            parts: list[str] = [rel + (":" if doc else "")]
-            if doc:
-                parts[0] += f" {doc}"
-
-            classes = []
-            for m in _CLASS_PATTERN.finditer(src):
-                name = m.group(1)
-                bases = _parse_bases(m.group(2) or "")
-                classes.append(f"{name}({bases})" if bases else name)
-
-            defs = _DEF_PATTERN.findall(src)
-            patterns = _detect_patterns(src)
-
-            detail: list[str] = []
-            if classes:
-                detail.append("cls:" + ",".join(classes))
-            if defs:
-                detail.append("fn:" + ",".join(defs))
-            if patterns:
-                detail.append("[" + ",".join(patterns) + "]")
-
-            if detail:
-                lines.append(parts[0] + "  " + "  ".join(detail))
-            elif not doc:
-                lines.append(rel)
-
-    if not found_any:
-        lines.append("(no code files found)")
-
-    return "\n".join(lines), file_contents
+    _crawl_directory(target_dir)
+    raw_summary = "\n".join(summary_lines)
+    return raw_summary, file_contents

@@ -26,6 +26,19 @@ _summary_state: dict[int, tuple[str, float, str]] = {}
 
 _DEFAULT_SUMMARY_INTERVAL = 1800  # seconds (30 minutes)
 _ENRICH_MAX_FILE_CHARS = 3000  # chars of each file sent to LLM for description
+_SUMMARY_MODEL_OPENAI = "mistral-small-latest"  # fast model for summarization on non-Claude backends
+
+
+def _find_git_root(path: str) -> str:
+    """Walk up from path until a .git directory is found; return that directory or path itself."""
+    current = path
+    while True:
+        if os.path.isdir(os.path.join(current, ".git")):
+            return current
+        parent = os.path.dirname(current)
+        if parent == current:
+            return path
+        current = parent
 
 
 def _get_active_dir(window: sublime.Window) -> str | None:
@@ -40,18 +53,22 @@ def _get_active_dir(window: sublime.Window) -> str | None:
 
 
 def _enrich_summary(win_id: int, target_dir: str, file_contents: dict[str, str]) -> None:
-    """Blocking: call the LLM to generate per-file descriptions, then update _summary_state."""
+    """Blocking: call the LLM to generate per-file descriptions, then update _summary_state.""" 
     settings = sublime.load_settings("SublimeAssistant.sublime-settings")
     url, api_key, model, _, backend = _get_api_config(settings)
+    if backend != "claude":
+        model = _SUMMARY_MODEL_OPENAI
+    print(f"[SA] Enriching {len(file_contents)} files with model={model}...")
     request_timeout = max(1, int(settings.get("request_timeout") or 120))
 
-    file_blocks = [
-        f"--- {rel} ---\n{content[:_ENRICH_MAX_FILE_CHARS]}"
-        for rel, content in file_contents.items()
-    ]
+    file_blocks = []
+    for rel, content in file_contents.items():
+        print(f"[SA]   summarizing: {rel}")
+        file_blocks.append(f"--- {rel.replace(os.sep, '/')} ---\n{content[:_ENRICH_MAX_FILE_CHARS]}")
     prompt = (
         "You are given files from a software project. "
         "For each file write exactly 2-3 sentences describing its purpose. "
+        "Include a list of classes and functions found in the file. "
         "Reply ONLY with lines in the exact format (one per file, no blank lines between):\n"
         "<filename>: <description>\n\n"
         "Files:\n" + "\n\n".join(file_blocks)
@@ -64,16 +81,28 @@ def _enrich_summary(win_id: int, target_dir: str, file_contents: dict[str, str])
         print(f"[SA] summary enrichment failed: {reply[:120]}")
         return
 
+    print(f"[SA] enrichment reply ({len(reply)} chars): {reply[:300]}")
+
     descriptions: dict[str, str] = {}
     for line in reply.splitlines():
         if ": " in line:
             fname, desc = line.split(": ", 1)
-            descriptions[fname.strip()] = desc.strip()
+            descriptions[fname.strip().replace(os.sep, '/')] = desc.strip()
+
+    # Build basename → rel_path map for fallback matching
+    basename_to_rel: dict[str, str] = {
+        os.path.basename(rel): rel.replace(os.sep, '/')
+        for rel in file_contents
+    }
 
     enriched_lines = [f"# {os.path.basename(target_dir)}/"]
     for rel in file_contents:
-        desc = descriptions.get(rel, "")
-        enriched_lines.append(f"{rel}: {desc}" if desc else rel)
+        norm = rel.replace(os.sep, '/')
+        desc = descriptions.get(norm, "")
+        if not desc:
+            # Fallback: match by basename alone (LLM may omit subdirectory)
+            desc = descriptions.get(os.path.basename(norm), "")
+        enriched_lines.append(f"{norm}: {desc}" if desc else norm)
 
     enriched = "--- DIRECTORY SUMMARY ---\n" + "\n".join(enriched_lines)
 
@@ -81,6 +110,13 @@ def _enrich_summary(win_id: int, target_dir: str, file_contents: dict[str, str])
     if state and state[0] == target_dir:
         _summary_state[win_id] = (target_dir, state[1], enriched)
         print(f"[SA] dir-summary enriched: {len(descriptions)}/{len(file_contents)} files described")
+        summary_file = os.path.join(target_dir, ".sublime_assistant_summary.md")
+        try:
+            with open(summary_file, "w", encoding="utf-8") as f:
+                f.write(enriched)
+            print(f"[SA] summary cached to {summary_file}")
+        except Exception as e:
+            print(f"[SA] could not write summary cache: {e}")
 
 
 def _auto_summary_context(window: sublime.Window) -> str:
@@ -92,20 +128,35 @@ def _auto_summary_context(window: sublime.Window) -> str:
     if not target_dir:
         return ""
 
+    git_root = _find_git_root(target_dir)
     win_id = window.id()
     now = time.time()
     last_dir, last_time, cached = _summary_state.get(win_id, ("", 0.0, ""))
 
-    if target_dir != last_dir or (now - last_time) >= interval:
-        raw, file_contents = summarizer.crawl(target_dir)
-        cached = f"--- DIRECTORY SUMMARY ---\n{raw}"
-        _summary_state[win_id] = (target_dir, now, cached)
-        if file_contents:
-            threading.Thread(
-                target=_enrich_summary,
-                args=(win_id, target_dir, file_contents),
-                daemon=True,
-            ).start()
+    if git_root == last_dir and (now - last_time) < interval:
+        return cached
+
+    # Try persistent file cache before crawling
+    summary_file = os.path.join(git_root, ".sublime_assistant_summary.md")
+    if os.path.isfile(summary_file):
+        try:
+            with open(summary_file, encoding="utf-8") as f:
+                cached = f.read()
+            _summary_state[win_id] = (git_root, now, cached)
+            print(f"[SA] loaded summary from {summary_file}")
+            return cached
+        except Exception:
+            pass
+
+    raw, file_contents = summarizer.crawl(git_root)
+    cached = f"--- DIRECTORY SUMMARY ---\n{raw}"
+    _summary_state[win_id] = (git_root, now, cached)
+    if file_contents:
+        threading.Thread(
+            target=_enrich_summary,
+            args=(win_id, git_root, file_contents),
+            daemon=True,
+        ).start()
 
     return cached
 
@@ -638,26 +689,35 @@ class SublimeAssistantSummarizeDirectoryCommand(sublime_plugin.WindowCommand):
             sublime.status_message("SublimeAssistant: no directory to summarize")
             return
 
+        git_root = _find_git_root(target_dir)
         win_id = self.window.id()
         _summary_state.pop(win_id, None)
-        sublime.status_message(f"SublimeAssistant: crawling {os.path.basename(target_dir)}/...")
+        # Remove stale file cache so enrichment rewrites it
+        summary_file = os.path.join(git_root, ".sublime_assistant_summary.md")
+        try:
+            os.remove(summary_file)
+        except OSError:
+            pass
+        sublime.status_message(f"SublimeAssistant: crawling {os.path.basename(git_root)}/...")
 
         def crawl_and_enrich() -> None:
-            raw, file_contents = summarizer.crawl(target_dir)
+            raw, file_contents = summarizer.crawl(git_root)
             cached = f"--- DIRECTORY SUMMARY ---\n{raw}"
-            _summary_state[win_id] = (target_dir, time.time(), cached)
+            _summary_state[win_id] = (git_root, time.time(), cached)
             if file_contents:
                 sublime.set_timeout(
                     lambda: sublime.status_message(
                         f"SublimeAssistant: enriching {len(file_contents)} files..."
                     ), 0,
                 )
-                _enrich_summary(win_id, target_dir, file_contents)
+                _enrich_summary(win_id, git_root, file_contents)
             sublime.set_timeout(
                 lambda: sublime.status_message(
-                    f"SublimeAssistant: summary ready for {os.path.basename(target_dir)}/"
+                    f"SublimeAssistant: summary ready for {os.path.basename(git_root)}/"
                 ), 0,
             )
+            # Print the summary to the console
+            print(cached)
 
         threading.Thread(target=crawl_and_enrich, daemon=True).start()
 
