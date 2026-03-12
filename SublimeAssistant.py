@@ -115,6 +115,7 @@ def _enrich_summary(win_id: int, target_dir: str, file_contents: dict[str, str])
             with open(summary_file, "w", encoding="utf-8") as f:
                 f.write(enriched)
             print(f"[SA] summary cached to {summary_file}")
+            sublime.set_timeout(lambda: sublime.active_window().run_command("refresh_folder_list"), 0)
         except Exception as e:
             print(f"[SA] could not write summary cache: {e}")
 

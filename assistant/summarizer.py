@@ -58,8 +58,8 @@ def crawl(target_dir: str) -> tuple[str, dict[str, str]]:
         with os.scandir(directory) as entries:
             for entry in entries:
                 if entry.is_dir():
-                    if entry.name == ".git":
-                        continue  # Skip .git directory
+                    if entry.name.startswith(".") or entry.name in _IGNORE_DIRS:
+                        continue  # Skip hidden dirs and known noisy dirs
                     _crawl_directory(entry.path)  # Recurse into subdirectory
                 elif entry.is_file() and os.path.splitext(entry.name)[1] in _CODE_EXTS:
                     rel_path = os.path.relpath(entry.path, target_dir)
