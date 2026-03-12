@@ -21,8 +21,8 @@ from .assistant import view as chat_view
 _pending_blocks: dict[str, tuple[str, str | None, list[int] | None]] = {}
 _block_counter = itertools.count()
 
-# window_id -> (directory, timestamp) — tracks when the last auto-summary ran
-_summary_state: dict[int, tuple[str, float]] = {}
+# window_id -> (directory, timestamp, cached_summary) — refreshed every interval
+_summary_state: dict[int, tuple[str, float, str]] = {}
 
 _DEFAULT_SUMMARY_INTERVAL = 1800  # seconds (30 minutes)
 
@@ -39,7 +39,7 @@ def _get_active_dir(window: sublime.Window) -> str | None:
 
 
 def _auto_summary_context(window: sublime.Window) -> str:
-    """Return a fresh summary string if the current directory hasn't been summarized recently."""
+    """Return the cached directory summary, re-crawling only when the interval has elapsed."""
     settings = sublime.load_settings("SublimeAssistant.sublime-settings")
     interval = int(settings.get("summary_interval") or _DEFAULT_SUMMARY_INTERVAL)
 
@@ -49,14 +49,13 @@ def _auto_summary_context(window: sublime.Window) -> str:
 
     win_id = window.id()
     now = time.time()
-    last_dir, last_time = _summary_state.get(win_id, ("", 0.0))
+    last_dir, last_time, cached = _summary_state.get(win_id, ("", 0.0, ""))
 
-    if target_dir == last_dir and (now - last_time) < interval:
-        return ""
+    if target_dir != last_dir or (now - last_time) >= interval:
+        cached = f"--- DIRECTORY SUMMARY ---\n{summarizer.crawl(target_dir)}"
+        _summary_state[win_id] = (target_dir, now, cached)
 
-    summary = summarizer.crawl(target_dir)
-    _summary_state[win_id] = (target_dir, now)
-    return f"--- DIRECTORY SUMMARY ---\n{summary}"
+    return cached
 
 
 def plugin_unloaded() -> None:

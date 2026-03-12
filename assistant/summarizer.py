@@ -5,11 +5,12 @@ import os
 import re
 
 _IGNORE_DIRS: frozenset[str] = frozenset({
-    ".git", "node_modules", "__pycache__", "dist", "build", "vendor"
+    "node_modules", "__pycache__", "dist", "build", "vendor"
 })
 _CODE_EXTS: frozenset[str] = frozenset({
-    ".py", ".js", ".ts", ".jsx", ".tsx", ".rb", ".go", ".java", ".cs", ".cpp", ".c", ".h"
+    ".py", ".md", ".sql", ".yml", ".yaml"
 })
+_MAX_FILE_BYTES = 1_000_000  # skip files larger than 1 MB
 
 _CLASS_PATTERN = re.compile(
     r"^(?:export\s+)?class\s+(\w+)(?:\s*[\(:]?\s*([^{:\n]+))?",
@@ -55,13 +56,15 @@ def crawl(root: str) -> str:
     found_any = False
 
     for dirpath, dirnames, filenames in os.walk(root):
-        dirnames[:] = sorted(d for d in dirnames if d not in _IGNORE_DIRS)
+        dirnames[:] = sorted(d for d in dirnames if d not in _IGNORE_DIRS and not d.startswith("."))
         for fname in sorted(filenames):
             ext = os.path.splitext(fname)[1].lower()
             if ext not in _CODE_EXTS:
                 continue
             fpath = os.path.join(dirpath, fname)
             rel = os.path.relpath(fpath, root)
+            if os.path.getsize(fpath) > _MAX_FILE_BYTES:
+                continue
             found_any = True
             try:
                 with open(fpath, encoding="utf-8") as f:
