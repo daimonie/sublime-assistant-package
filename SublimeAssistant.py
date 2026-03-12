@@ -25,6 +25,7 @@ _block_counter = itertools.count()
 _summary_state: dict[int, tuple[str, float, str]] = {}
 
 _DEFAULT_SUMMARY_INTERVAL = 1800  # seconds (30 minutes)
+_ENRICH_MAX_FILE_CHARS = 3000  # chars of each file sent to LLM for description
 
 
 def _get_active_dir(window: sublime.Window) -> str | None:
@@ -36,6 +37,50 @@ def _get_active_dir(window: sublime.Window) -> str | None:
             return os.path.dirname(fp)
     folders = window.folders()
     return folders[0] if folders else None
+
+
+def _enrich_summary(win_id: int, target_dir: str, file_contents: dict[str, str]) -> None:
+    """Blocking: call the LLM to generate per-file descriptions, then update _summary_state."""
+    settings = sublime.load_settings("SublimeAssistant.sublime-settings")
+    url, api_key, model, _, backend = _get_api_config(settings)
+    request_timeout = max(1, int(settings.get("request_timeout") or 120))
+
+    file_blocks = [
+        f"--- {rel} ---\n{content[:_ENRICH_MAX_FILE_CHARS]}"
+        for rel, content in file_contents.items()
+    ]
+    prompt = (
+        "You are given files from a software project. "
+        "For each file write exactly 2-3 sentences describing its purpose. "
+        "Reply ONLY with lines in the exact format (one per file, no blank lines between):\n"
+        "<filename>: <description>\n\n"
+        "Files:\n" + "\n\n".join(file_blocks)
+    )
+
+    client = _make_client(url, api_key, model, request_timeout, backend)
+    reply, success = client.call([{"role": "user", "content": prompt}])
+
+    if not success:
+        print(f"[SA] summary enrichment failed: {reply[:120]}")
+        return
+
+    descriptions: dict[str, str] = {}
+    for line in reply.splitlines():
+        if ": " in line:
+            fname, desc = line.split(": ", 1)
+            descriptions[fname.strip()] = desc.strip()
+
+    enriched_lines = [f"# {os.path.basename(target_dir)}/"]
+    for rel in file_contents:
+        desc = descriptions.get(rel, "")
+        enriched_lines.append(f"{rel}: {desc}" if desc else rel)
+
+    enriched = "--- DIRECTORY SUMMARY ---\n" + "\n".join(enriched_lines)
+
+    state = _summary_state.get(win_id)
+    if state and state[0] == target_dir:
+        _summary_state[win_id] = (target_dir, state[1], enriched)
+        print(f"[SA] dir-summary enriched: {len(descriptions)}/{len(file_contents)} files described")
 
 
 def _auto_summary_context(window: sublime.Window) -> str:
@@ -52,8 +97,15 @@ def _auto_summary_context(window: sublime.Window) -> str:
     last_dir, last_time, cached = _summary_state.get(win_id, ("", 0.0, ""))
 
     if target_dir != last_dir or (now - last_time) >= interval:
-        cached = f"--- DIRECTORY SUMMARY ---\n{summarizer.crawl(target_dir)}"
+        raw, file_contents = summarizer.crawl(target_dir)
+        cached = f"--- DIRECTORY SUMMARY ---\n{raw}"
         _summary_state[win_id] = (target_dir, now, cached)
+        if file_contents:
+            threading.Thread(
+                target=_enrich_summary,
+                args=(win_id, target_dir, file_contents),
+                daemon=True,
+            ).start()
 
     return cached
 
@@ -578,7 +630,7 @@ class SublimeAssistantSelectModelCommand(sublime_plugin.WindowCommand):
 
 
 class SublimeAssistantSummarizeDirectoryCommand(sublime_plugin.WindowCommand):
-    """Force-refresh the directory summary; it will be injected automatically on the next query."""
+    """Force-refresh the directory summary with LLM-generated descriptions."""
 
     def run(self) -> None:
         target_dir = _get_active_dir(self.window)
@@ -586,9 +638,28 @@ class SublimeAssistantSummarizeDirectoryCommand(sublime_plugin.WindowCommand):
             sublime.status_message("SublimeAssistant: no directory to summarize")
             return
 
-        # Expire the cached state so _auto_summary_context re-crawls on the next query
-        _summary_state.pop(self.window.id(), None)
-        sublime.status_message(f"SublimeAssistant: summary refreshed for {os.path.basename(target_dir)}/")
+        win_id = self.window.id()
+        _summary_state.pop(win_id, None)
+        sublime.status_message(f"SublimeAssistant: crawling {os.path.basename(target_dir)}/...")
+
+        def crawl_and_enrich() -> None:
+            raw, file_contents = summarizer.crawl(target_dir)
+            cached = f"--- DIRECTORY SUMMARY ---\n{raw}"
+            _summary_state[win_id] = (target_dir, time.time(), cached)
+            if file_contents:
+                sublime.set_timeout(
+                    lambda: sublime.status_message(
+                        f"SublimeAssistant: enriching {len(file_contents)} files..."
+                    ), 0,
+                )
+                _enrich_summary(win_id, target_dir, file_contents)
+            sublime.set_timeout(
+                lambda: sublime.status_message(
+                    f"SublimeAssistant: summary ready for {os.path.basename(target_dir)}/"
+                ), 0,
+            )
+
+        threading.Thread(target=crawl_and_enrich, daemon=True).start()
 
 
 class SublimeAssistantReloadListener(sublime_plugin.EventListener):

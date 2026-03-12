@@ -49,10 +49,11 @@ def _parse_bases(raw: str) -> str:
     return ", ".join(b.strip() for b in raw.split(",") if b.strip())
 
 
-def crawl(root: str) -> str:
-    """Return a compact architecture summary of code files under root."""
+def crawl(root: str) -> tuple[str, dict[str, str]]:
+    """Return (summary_text, {rel_path: content}) for code files under root."""
     root = os.path.abspath(root)
     lines: list[str] = [f"# {os.path.basename(root)}/"]
+    file_contents: dict[str, str] = {}
     found_any = False
 
     for dirpath, dirnames, filenames in os.walk(root):
@@ -72,6 +73,8 @@ def crawl(root: str) -> str:
             except Exception:
                 lines.append(f"{rel}: (unreadable)")
                 continue
+
+            file_contents[rel] = src
 
             doc = _extract_docstring(src)
             parts: list[str] = [rel + (":" if doc else "")]
@@ -103,4 +106,4 @@ def crawl(root: str) -> str:
     if not found_any:
         lines.append("(no code files found)")
 
-    return "\n".join(lines)
+    return "\n".join(lines), file_contents
