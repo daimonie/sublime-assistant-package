@@ -834,14 +834,7 @@ class SublimeAssistantSubmitCommand(sublime_plugin.TextCommand):
 
         g_root = _find_git_root(active_dir) if active_dir else ""
 
-        if cmd == "/commit":
-            diff = git.get_staged_diff(g_root)
-            api_q += f"\n\n--- STAGED DIFF ---\n{diff or '(no staged changes)'}"
-        elif cmd == "/pr":
-            diff = git.get_diff(g_root)
-            log = git.get_log(g_root)
-            api_q += f"\n\n--- GIT LOG ---\n{log}\n\n--- DIFF ---\n{diff or '(nothing changed)'}"
-        elif cmd == "/diff":
+        if cmd == "/diff":
             diff = git.get_diff(g_root)
             api_q += f"\n\n--- GIT DIFF ---\n{diff or '(nothing changed)'}"
 

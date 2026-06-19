@@ -12,11 +12,6 @@ TEMPLATES: dict[str, str] = {
         "Research the following topic thoroughly. Use the fetch_url tool to consult relevant "
         "documentation and authoritative sources, then provide a comprehensive summary with citations:\n\n"
     ),
-    "/commit": (
-        "Generate a concise conventional commit message for the following staged changes. "
-        "Output only the commit message, no preamble:\n\n"
-    ),
-    "/pr": "Write a GitHub pull request title and body for the following changes:\n\n",
     "/diff": "Explain and review the following git diff:\n\n",
 }
 

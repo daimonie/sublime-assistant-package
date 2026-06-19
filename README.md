@@ -8,42 +8,40 @@ It connects your editor to a local LLM (via Ollama), the Mistral API, or the Cla
 
 ---
 
-## Features
+## features
 
-- **Context-aware AI** — Automatically sends the active file and any selected text with every query.
-- **Persistent chat panel** — A dedicated Markdown split-pane that keeps the full conversation history per window.
-- **Streaming responses** — Token-by-token display as the model generates, so you see the reply as it arrives.
-- **Inline phantom suggestions** — Every code block the assistant produces shows a phantom directly in your editor at the target location, with **Accept** (instant apply), **≋ Diff** (open diff preview), and **Dismiss** buttons. No need to leave the editor to review a suggestion.
-- **Apply with diff preview** — The **≋ Diff** path opens a unified diff showing exactly what changes, with **✓ Accept** / **✗ Reject** before anything is written to disk.
-- **Slash commands** — Type a command alone in the input strip to trigger preset prompts or plugin actions:
+- **context-aware ai** — automatically sends the active file and any selected text with every query.
+- **persistent chat panel** — a dedicated markdown split-pane that keeps the full conversation history per window.
+- **streaming responses** — token-by-token display as the model generates, so you see the reply as it arrives.
+- **inline phantom suggestions** — every code block the assistant produces shows a phantom directly in your editor at the target location, with **accept** (instant apply), **≋ diff** (open diff preview), and **dismiss** buttons. no need to leave the editor to review a suggestion.
+- **apply with diff preview** — the **≋ diff** path opens a unified diff showing exactly what changes, with **✓ accept** / **✗ reject** before anything is written to disk.
+- **slash commands** — type a command alone in the input strip to trigger preset prompts or plugin actions:
 
-  | Command | What it does |
+  | command | what it does |
   |---------|-------------|
-  | `/explain` | Explain the selected code in detail |
-  | `/fix` | Identify and fix bugs |
-  | `/tests` | Write unit tests for the selected code |
-  | `/review` | Code review for correctness, style, and performance |
-  | `/debug` | Root-cause analysis and fix proposal |
-  | `/docs` | Write docstrings and comments |
-  | `/research` | Research a topic using the `fetch_url` tool and cite sources |
-  | `/commit` | Generate a conventional commit message from the staged diff |
-  | `/pr` | Write a GitHub PR title and body from recent commits and diff |
-  | `/diff` | Explain and review the current working-tree diff |
-  | `/init` | Crawl the project directory and build the file-summary cache |
-  | `/compact` | Clear the conversation history for this window |
-  | `/clear` | Same as `/compact` |
+  | `/explain` | explain the selected code in detail |
+  | `/fix` | identify and fix bugs |
+  | `/tests` | write unit tests for the selected code |
+  | `/review` | code review for correctness, style, and performance |
+  | `/debug` | root-cause analysis and fix proposal |
+  | `/docs` | write docstrings and comments |
+  | `/research` | research a topic using the `fetch_url` tool and cite sources |
+  | `/diff` | explain and review the current working-tree diff |
+  | `/init` | crawl the project directory and build the file-summary cache |
+  | `/compact` | clear the conversation history for this window |
+  | `/clear` | same as `/compact` |
 
-  Slash commands must be the **entire input** (e.g. type `/explain` alone, then Ctrl+Enter). You can append extra context after the command: `/fix there's a race condition in the handler`.
+  slash commands must be the **entire input** (e.g. type `/explain` alone, then ctrl+enter). you can append extra context after the command: `/fix there's a race condition in the handler`.
 
-- **Project rules** — Place an `AGENTS.md` and/or `SKILLS.md` file at the git root. Their contents are automatically prepended to the system prompt at the start of each window session, letting you set project-specific instructions, conventions, or personas.
-- **Suggested commands** — When the model recommends a shell command to run (tests, linter, build), it outputs it in a `suggested-command` fenced block. The plugin displays it but **never executes it** — you copy and run it yourself.
-- **Multi-file referencing** — Type `@filename.ext` in the input area to include any open or project file.
-- **Tool use** — The model can call `read_file`, `fetch_url`, `list_project_files`, and `get_file_summary` tools mid-conversation. Tool calls are shown in the chat footer.
-- **Directory summary (lazy)** — Run `/init` or **Summarize Directory** from the Command Palette to crawl the git root and build LLM-generated per-file descriptions. The summary is cached to `.sublime_assistant_summary.md`. When the model needs project context it calls `list_project_files` / `get_file_summary` rather than having the entire summary injected into every message.
-- **New file creation** — When the LLM suggests a brand-new file, the Apply workflow lets you review and create it with one click.
-- **Preset switching** — Switch between a local Ollama endpoint, the Mistral API, or the Claude API from the Command Palette without touching config files.
-- **Auto-reload on save** — When you edit any file in `SublimeAssistant/assistant/`, the submodule is hot-reloaded automatically.
-- **Asynchronous** — API calls run in a background thread; the editor never freezes.
+- **project rules** — place an `agents.md` and/or `skills.md` file at the git root. their contents are automatically prepended to the system prompt at the start of each window session, letting you set project-specific instructions, conventions, or personas.
+- **suggested commands** — when the model recommends a shell command to run (tests, linter, build), it outputs it in a `suggested-command` fenced block. the plugin displays it but **never executes it** — you copy and run it yourself.
+- **multi-file referencing** — type `@filename.ext` in the input area to include any open or project file.
+- **tool use** — the model can call `read_file`, `fetch_url`, `list_project_files`, and `get_file_summary` tools mid-conversation. tool calls are shown in the chat footer.
+- **directory summary (lazy)** — run `/init` or **summarize directory** from the command palette to crawl the git root and build llm-generated per-file descriptions. the summary is cached to `.sublime_assistant_summary.md`. when the model needs project context it calls `list_project_files` / `get_file_summary` rather than having the entire summary injected into every message.
+- **new file creation** — when the llm suggests a brand-new file, the apply workflow lets you review and create it with one click.
+- **preset switching** — switch between a local ollama endpoint, the mistral api, or the claude api from the command palette without touching config files.
+- **auto-reload on save** — when you edit any file in `sublimeassistant/assistant/`, the submodule is hot-reloaded automatically.
+- **asynchronous** — api calls run in a background thread; the editor never freezes.
 
 ---
 
