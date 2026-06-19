@@ -42,6 +42,36 @@ READ_FILE_TOOL = {
     },
 }
 
+LIST_PROJECT_FILES_TOOL = {
+    "type": "function",
+    "function": {
+        "name": "list_project_files",
+        "description": (
+            "List all project files with one-line descriptions. "
+            "Call this first to understand the project structure before reading individual files."
+        ),
+        "parameters": {"type": "object", "properties": {}, "required": []},
+    },
+}
+
+GET_FILE_SUMMARY_TOOL = {
+    "type": "function",
+    "function": {
+        "name": "get_file_summary",
+        "description": "Get the full content of a specific project file for detailed inspection.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "path": {
+                    "type": "string",
+                    "description": "Relative path to the file (e.g. 'assistant/api.py')",
+                }
+            },
+            "required": ["path"],
+        },
+    },
+}
+
 FETCH_URL_TOOL = {
     "type": "function",
     "function": {
@@ -272,6 +302,116 @@ def _do_request(
         return None, "\n".join(err), False
 
 
+def _dispatch_tool(
+    name: str,
+    args: str,
+    on_tool_call: Callable[[str, str], None] | None,
+    on_read_file: Callable[[str], str | None] | None,
+    on_list_files: Callable[[], str] | None,
+    on_get_file_summary: Callable[[str], str] | None,
+) -> str:
+    """Execute one tool call and return the result string."""
+    if name == "list_project_files" and on_list_files:
+        if on_tool_call:
+            on_tool_call(name, "")
+        return on_list_files()
+    if name == "get_file_summary" and on_get_file_summary:
+        try:
+            path = (json.loads(args).get("path") or "").strip()
+            if on_tool_call and path:
+                on_tool_call(name, path)
+            return on_get_file_summary(path)
+        except Exception as e:
+            return f"Error: {e}"
+    if name == "read_file" and on_read_file:
+        try:
+            fname = (json.loads(args).get("filename") or "").strip()
+            if on_tool_call and fname:
+                on_tool_call(name, fname)
+            content = on_read_file(fname) if fname else None
+            return content if content is not None else f"File not found: {fname}"
+        except Exception as e:
+            return f"Error reading file: {e}"
+    # fetch_url and unknown tools
+    if on_tool_call and name == "fetch_url":
+        try:
+            fetch_url_arg = (json.loads(args).get("url") or "").strip()
+            if fetch_url_arg:
+                on_tool_call(name, fetch_url_arg)
+        except Exception:
+            on_tool_call(name, args)
+    return _run_tool(name, args)
+
+
+def _do_request_streaming(
+    url: str,
+    headers: dict,
+    model: str,
+    messages: list[dict],
+    tools: list[dict] | None,
+    on_chunk: Callable[[str], None],
+    timeout_seconds: int = _TIMEOUT,
+) -> tuple[str, list[dict], str, bool]:
+    """Stream a request via SSE. Returns (text, tool_calls, error_msg, success).
+
+    Calls on_chunk(accumulated_text) after each content token.
+    tool_calls is non-empty when the model wants to invoke tools.
+    """
+    body: dict = {"model": model, "messages": messages, "stream": True}
+    if tools:
+        body["tools"] = tools
+    payload = json.dumps(body).encode()
+    req = urllib.request.Request(url, data=payload, headers=headers, method="POST")
+
+    accumulated = ""
+    # tool_calls assembled by delta index
+    tc_by_index: dict[int, dict] = {}
+    finish_reason = ""
+
+    try:
+        with urllib.request.urlopen(req, timeout=timeout_seconds) as resp:
+            for raw in resp:
+                line = raw.decode("utf-8", errors="replace").rstrip("\r\n")
+                if not line.startswith("data: "):
+                    continue
+                data = line[6:]
+                if data == "[DONE]":
+                    break
+                try:
+                    chunk = json.loads(data)
+                except json.JSONDecodeError:
+                    continue
+                choices = chunk.get("choices") or []
+                if not choices:
+                    continue
+                choice = choices[0]
+                finish_reason = choice.get("finish_reason") or finish_reason
+                delta = choice.get("delta") or {}
+                token = delta.get("content") or ""
+                if token:
+                    accumulated += token
+                    try:
+                        on_chunk(accumulated)
+                    except Exception:
+                        pass
+                for tc_delta in delta.get("tool_calls") or []:
+                    idx = tc_delta.get("index", 0)
+                    if idx not in tc_by_index:
+                        tc_by_index[idx] = {"id": "", "function": {"name": "", "arguments": ""}}
+                    entry = tc_by_index[idx]
+                    entry["id"] = entry["id"] or tc_delta.get("id", "")
+                    fn_delta = tc_delta.get("function") or {}
+                    entry["function"]["name"] = entry["function"]["name"] or fn_delta.get("name", "")
+                    entry["function"]["arguments"] += fn_delta.get("arguments", "")
+    except (socket.timeout, TimeoutError) as e:
+        return accumulated, [], f"Request timed out after {timeout_seconds}s", False
+    except Exception as e:
+        return accumulated, [], f"{type(e).__name__}: {e}", False
+
+    tool_calls = [tc_by_index[i] for i in sorted(tc_by_index)]
+    return accumulated, tool_calls, "", True
+
+
 def call(
     url: str,
     api_key: str,
@@ -280,6 +420,9 @@ def call(
     tools: list[dict] | None = None,
     on_tool_call: Callable[[str, str], None] | None = None,
     on_read_file: Callable[[str], str | None] | None = None,
+    on_list_files: Callable[[], str] | None = None,
+    on_get_file_summary: Callable[[str], str] | None = None,
+    on_chunk: Callable[[str], None] | None = None,
     timeout_seconds: int | None = None,
 ) -> tuple[str, bool]:
     """Send messages to the API; if the model returns tool_calls, run them and continue. Returns (reply_text, success).
@@ -297,6 +440,30 @@ def call(
     while rounds < _MAX_TOOL_ROUNDS:
         rounds += 1
         request_info = _format_request_info(url, model, current_messages)
+
+        if on_chunk:
+            text, tool_calls_stream, err_msg, ok = _do_request_streaming(
+                url, headers, model, current_messages, tools, on_chunk, timeout_seconds=timeout
+            )
+            if not ok:
+                summary = _format_tool_summary(tools_invoked)
+                return f"**SublimeAssistant – streaming error**\n\n{err_msg}\n\n" + summary, False
+            if not tool_calls_stream:
+                return text.strip() if text.strip() else "Error: Empty assistant response.", True
+            assistant_msg: dict = {"role": "assistant", "content": text or None, "tool_calls": tool_calls_stream}
+            current_messages.append(assistant_msg)
+            for tc in tool_calls_stream:
+                tc_id = tc.get("id") or ""
+                fn = tc.get("function") or {}
+                name = fn.get("name") or ""
+                args = fn.get("arguments") or "{}"
+                result_text = _dispatch_tool(
+                    name, args, on_tool_call, on_read_file, on_list_files, on_get_file_summary
+                )
+                tools_invoked.append((name, len(result_text)))
+                current_messages.append({"role": "tool", "tool_call_id": tc_id, "content": result_text})
+            continue
+
         result, err_msg, ok = _do_request(
             url, api_key, model, current_messages, tools, headers, request_info, timeout_seconds=timeout
         )
@@ -329,24 +496,9 @@ def call(
             fn = tc.get("function") or {}
             name = fn.get("name") or ""
             args = fn.get("arguments") or "{}"
-            if on_tool_call and name == "fetch_url":
-                try:
-                    fetch_url_arg = (json.loads(args).get("url") or "").strip()
-                    if fetch_url_arg:
-                        on_tool_call(name, fetch_url_arg)
-                except Exception:
-                    on_tool_call(name, args)
-            if name == "read_file" and on_read_file:
-                try:
-                    fname = (json.loads(args).get("filename") or "").strip()
-                    if on_tool_call and fname:
-                        on_tool_call(name, fname)
-                    content = on_read_file(fname) if fname else None
-                    result_text = content if content is not None else f"File not found: {fname}"
-                except Exception as e:
-                    result_text = f"Error reading file: {e}"
-            else:
-                result_text = _run_tool(name, args)
+            result_text = _dispatch_tool(
+                name, args, on_tool_call, on_read_file, on_list_files, on_get_file_summary
+            )
             tools_invoked.append((name, len(result_text)))
             current_messages.append({
                 "role": "tool",
@@ -361,6 +513,93 @@ def call(
 CLAUDE_API_URL = "https://api.anthropic.com/v1/messages"
 _CLAUDE_MODELS_URL = "https://api.anthropic.com/v1/models"
 _ANTHROPIC_VERSION = "2023-06-01"
+
+
+def _do_claude_request_streaming(
+    headers: dict,
+    body: dict,
+    on_chunk: Callable[[str], None],
+    timeout_seconds: int = _TIMEOUT,
+) -> tuple[str, list[dict], str, bool]:
+    """Stream a Claude Messages API request via SSE.
+
+    Returns (text, tool_use_blocks, error_msg, success).
+    tool_use_blocks are Anthropic-format dicts (type='tool_use', id, name, input).
+    """
+    stream_body = {**body, "stream": True}
+    payload = json.dumps(stream_body).encode()
+    req = urllib.request.Request(CLAUDE_API_URL, data=payload, headers=headers, method="POST")
+
+    accumulated = ""
+    # block_index -> {"type": "text"|"tool_use", "id": "", "name": "", "input_json": ""}
+    blocks: dict[int, dict] = {}
+    current_event = ""
+
+    try:
+        with urllib.request.urlopen(req, timeout=timeout_seconds) as resp:
+            for raw in resp:
+                line = raw.decode("utf-8", errors="replace").rstrip("\r\n")
+                if line.startswith("event: "):
+                    current_event = line[7:].strip()
+                    continue
+                if not line.startswith("data: "):
+                    continue
+                data = line[6:]
+                try:
+                    ev = json.loads(data)
+                except json.JSONDecodeError:
+                    continue
+
+                ev_type = ev.get("type", "")
+
+                if ev_type == "content_block_start":
+                    idx = ev.get("index", 0)
+                    block = ev.get("content_block") or {}
+                    blocks[idx] = {
+                        "type": block.get("type", ""),
+                        "id": block.get("id", ""),
+                        "name": block.get("name", ""),
+                        "input_json": "",
+                    }
+
+                elif ev_type == "content_block_delta":
+                    idx = ev.get("index", 0)
+                    delta = ev.get("delta") or {}
+                    dtype = delta.get("type", "")
+                    if dtype == "text_delta":
+                        accumulated += delta.get("text", "")
+                        try:
+                            on_chunk(accumulated)
+                        except Exception:
+                            pass
+                    elif dtype == "input_json_delta":
+                        if idx in blocks:
+                            blocks[idx]["input_json"] += delta.get("partial_json", "")
+
+                elif ev_type == "message_stop":
+                    break
+
+    except (socket.timeout, TimeoutError) as e:
+        return accumulated, [], f"Request timed out after {timeout_seconds}s", False
+    except Exception as e:
+        return accumulated, [], f"{type(e).__name__}: {e}", False
+
+    tool_use_blocks = []
+    for idx in sorted(blocks):
+        b = blocks[idx]
+        if b["type"] == "tool_use":
+            try:
+                inp = json.loads(b["input_json"]) if b["input_json"] else {}
+            except json.JSONDecodeError:
+                inp = {}
+            tool_use_blocks.append({
+                "type": "tool_use",
+                "id": b["id"],
+                "name": b["name"],
+                "input": inp,
+            })
+
+    return accumulated, tool_use_blocks, "", True
 
 
 def _openai_tools_to_claude(tools: list[dict]) -> list[dict]:
@@ -438,6 +677,9 @@ class APIClient(abc.ABC):
         tools: list[dict] | None = None,
         on_tool_call: Callable[[str, str], None] | None = None,
         on_read_file: Callable[[str], str | None] | None = None,
+        on_list_files: Callable[[], str] | None = None,
+        on_get_file_summary: Callable[[str], str] | None = None,
+        on_chunk: Callable[[str], None] | None = None,
     ) -> tuple[str, bool]:
         """Send *messages* to the backend and return (reply_text, success)."""
         ...
@@ -461,6 +703,9 @@ class OpenAIClient(APIClient):
         tools: list[dict] | None = None,
         on_tool_call: Callable[[str, str], None] | None = None,
         on_read_file: Callable[[str], str | None] | None = None,
+        on_list_files: Callable[[], str] | None = None,
+        on_get_file_summary: Callable[[str], str] | None = None,
+        on_chunk: Callable[[str], None] | None = None,
     ) -> tuple[str, bool]:
         return call(
             self.url,
@@ -470,6 +715,9 @@ class OpenAIClient(APIClient):
             tools=tools,
             on_tool_call=on_tool_call,
             on_read_file=on_read_file,
+            on_list_files=on_list_files,
+            on_get_file_summary=on_get_file_summary,
+            on_chunk=on_chunk,
             timeout_seconds=self.timeout_seconds,
         )
 
@@ -504,6 +752,9 @@ class ClaudeClient(APIClient):
         tools: list[dict] | None = None,
         on_tool_call: Callable[[str, str], None] | None = None,
         on_read_file: Callable[[str], str | None] | None = None,
+        on_list_files: Callable[[], str] | None = None,
+        on_get_file_summary: Callable[[str], str] | None = None,
+        on_chunk: Callable[[str], None] | None = None,
     ) -> tuple[str, bool]:
         headers = {
             "Content-Type": "application/json",
@@ -527,6 +778,39 @@ class ClaudeClient(APIClient):
                 body["system"] = system
             if claude_tools:
                 body["tools"] = claude_tools
+
+            # Use streaming when on_chunk is provided
+            if on_chunk:
+                text, tool_use_blocks, err_msg, ok = _do_claude_request_streaming(
+                    headers, body, on_chunk, self.timeout_seconds
+                )
+                if not ok:
+                    summary = _format_tool_summary(tools_invoked)
+                    return f"**SublimeAssistant – streaming error**\n\n{err_msg}\n\n" + summary, False
+                if not tool_use_blocks:
+                    return text.strip() if text.strip() else "Error: Empty assistant response.", True
+                # Process tool calls and continue
+                content_blocks_for_msg = []
+                if text:
+                    content_blocks_for_msg.append({"type": "text", "text": text})
+                content_blocks_for_msg.extend(tool_use_blocks)
+                current_messages.append({"role": "assistant", "content": content_blocks_for_msg})
+                tool_results = []
+                for block in tool_use_blocks:
+                    name = block.get("name", "")
+                    tool_use_id = block.get("id", "")
+                    inp = block.get("input") or {}
+                    result_text = _dispatch_tool(
+                        name, json.dumps(inp), on_tool_call, on_read_file, on_list_files, on_get_file_summary
+                    )
+                    tools_invoked.append((name, len(result_text)))
+                    tool_results.append({
+                        "type": "tool_result",
+                        "tool_use_id": tool_use_id,
+                        "content": result_text,
+                    })
+                current_messages.append({"role": "user", "content": tool_results})
+                continue
 
             payload = json.dumps(body).encode()
             req = urllib.request.Request(CLAUDE_API_URL, data=payload, headers=headers, method="POST")
@@ -583,18 +867,9 @@ class ClaudeClient(APIClient):
                 name = block.get("name", "")
                 tool_use_id = block.get("id", "")
                 inp = block.get("input") or {}
-                if on_tool_call and name == "fetch_url":
-                    url_arg = (inp.get("url") or "").strip()
-                    if url_arg:
-                        on_tool_call(name, url_arg)
-                if name == "read_file" and on_read_file:
-                    fname = (inp.get("filename") or "").strip()
-                    if on_tool_call and fname:
-                        on_tool_call(name, fname)
-                    content = on_read_file(fname) if fname else None
-                    result_text = content if content is not None else f"File not found: {fname}"
-                else:
-                    result_text = _run_tool(name, json.dumps(inp))
+                result_text = _dispatch_tool(
+                    name, json.dumps(inp), on_tool_call, on_read_file, on_list_files, on_get_file_summary
+                )
                 tools_invoked.append((name, len(result_text)))
                 tool_results.append({
                     "type": "tool_result",

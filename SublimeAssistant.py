@@ -1,6 +1,7 @@
 """SublimeAssistant – AI coding assistant for Sublime Text."""
 from __future__ import annotations
 
+import difflib
 import importlib
 import itertools
 import json
@@ -12,7 +13,8 @@ import time
 import sublime
 import sublime_plugin
 
-from .assistant import api, code_extractor, context, file_finder, history, input_view, summarizer
+from .assistant import api, code_extractor, context, file_finder, git, history, input_view, summarizer
+from .assistant import project_rules, slash_commands
 from .assistant import diff_view as diff_mgr
 from .assistant import view as chat_view
 
@@ -23,6 +25,19 @@ _block_counter = itertools.count()
 
 # window_id -> (directory, timestamp, cached_summary) — refreshed every interval
 _summary_state: dict[int, tuple[str, float, str]] = {}
+
+# view_id -> PhantomSet for the input area hint
+_hint_sets: dict[int, sublime.PhantomSet] = {}
+
+# block_id -> PhantomSet for inline editor suggestion phantom
+_inline_phantom_sets: dict[str, sublime.PhantomSet] = {}
+
+_HINT_HTML = (
+    '<body id="sa-hint"><style>'
+    'body { margin: 0; padding: 2px 0;'
+    ' color: color(var(--foreground) alpha(0.35)); font-style: italic; }'
+    '</style>Ask anything… <i>Ctrl+Enter</i> to send</body>'
+)
 
 _DEFAULT_SUMMARY_INTERVAL = 1800  # seconds (30 minutes)
 _ENRICH_MAX_FILE_CHARS = 3000  # chars of each file sent to LLM for description
@@ -230,6 +245,7 @@ def _call_api(
     panel: sublime.View,
     full_content: str,
     selection_region: list[int] | None,
+    git_root: str = "",
 ) -> None:
     """
     Call the API with the constructed messages and handle the response.
@@ -254,8 +270,13 @@ def _call_api(
     url, api_key, model, system_prompt, backend = _get_api_config(settings)
 
     win_id = window.id()
+
+    # Prepend project rules (AGENTS.md / SKILLS.md) to system prompt once per window session
+    rules = project_rules.load(git_root, win_id) if git_root else ""
+    if rules:
+        system_prompt = rules + "\n\n---\n\n" + system_prompt
+
     messages = history.get_messages(win_id, system_prompt) + [{"role": "user", "content": full_content}]
-    tools = [api.FETCH_URL_TOOL, api.READ_FILE_TOOL]
     request_timeout = max(1, int(settings.get("request_timeout") or 120))
 
     file_requests: list[str] = []
@@ -265,12 +286,53 @@ def _call_api(
         file_requests.append(filename)
         return file_finder.find(window, filename)
 
+    # F6: lazy directory summary tool callbacks
+    fetched_files: set[str] = set()
+
+    def on_list_files() -> str:
+        state = _summary_state.get(win_id)
+        if state:
+            return state[2]
+        summary_file = os.path.join(git_root, ".sublime_assistant_summary.md") if git_root else ""
+        if summary_file and os.path.isfile(summary_file):
+            try:
+                text = open(summary_file, encoding="utf-8").read()
+                _summary_state[win_id] = (git_root, time.time(), text)
+                return text
+            except Exception:
+                pass
+        if not git_root:
+            return "(no project directory found)"
+        raw, file_contents = summarizer.crawl(git_root)
+        cached = f"--- DIRECTORY SUMMARY ---\n{raw}"
+        _summary_state[win_id] = (git_root, time.time(), cached)
+        if file_contents:
+            threading.Thread(
+                target=_enrich_summary,
+                args=(win_id, git_root, file_contents),
+                daemon=True,
+            ).start()
+        return cached
+
+    def on_get_file_summary(path: str) -> str:
+        if path in fetched_files:
+            return f"(content of {path} was already provided in this response)"
+        content = file_finder.find(window, path)
+        if content is None:
+            return f"File not found: {path}"
+        fetched_files.add(path)
+        return content
+
     def on_tool_call(tool_name: str, url_or_args: str) -> None:
         if tool_name == "fetch_url":
             url_requests.append(url_or_args)
             display = url_or_args if len(url_or_args) <= 60 else url_or_args[:57] + "..."
             status = f"> _Fetching {display}..._"
         elif tool_name == "read_file":
+            status = f"> _Reading {url_or_args}..._"
+        elif tool_name == "list_project_files":
+            status = "> _Listing project files..._"
+        elif tool_name == "get_file_summary":
             status = f"> _Reading {url_or_args}..._"
         else:
             return
@@ -279,12 +341,30 @@ def _call_api(
             0,
         )
 
+    tools = [api.FETCH_URL_TOOL, api.READ_FILE_TOOL,
+             api.LIST_PROJECT_FILES_TOOL, api.GET_FILE_SUMMARY_TOOL]
+
+    def on_chunk(text: str) -> None:
+        sublime.set_timeout(
+            lambda t=text: panel.run_command("sublime_assistant_stream_update", {"text": t}),
+            0,
+        )
+
     client = _make_client(url, api_key, model, request_timeout, backend)
-    reply, success = client.call(messages, tools=tools, on_tool_call=on_tool_call, on_read_file=on_read_file)
+    reply, success = client.call(
+        messages, tools=tools,
+        on_tool_call=on_tool_call,
+        on_read_file=on_read_file,
+        on_list_files=on_list_files,
+        on_get_file_summary=on_get_file_summary,
+        on_chunk=on_chunk,
+    )
 
     tool_log_parts: list[str] = []
     if file_requests:
         tool_log_parts.append("read " + ", ".join(f"`{f}`" for f in file_requests))
+    if fetched_files:
+        tool_log_parts.append("summarized " + ", ".join(f"`{f}`" for f in sorted(fetched_files)))
     if url_requests:
         tool_log_parts.append("fetched " + ", ".join(f"`{u}`" for u in url_requests))
     if tool_log_parts:
@@ -311,6 +391,7 @@ def _submit_query(
     active_filename: str,
     selection: str,
     selection_region: list[int] | None,
+    api_query: str = "",
 ) -> None:
     """
     Submit the user query to the assistant and initiate the API call workflow.
@@ -334,10 +415,14 @@ def _submit_query(
     if pending_summary:
         window.settings().erase("sa_pending_summary")
 
-    auto_summary = _auto_summary_context(window)
-    extra = "\n\n".join(filter(None, [auto_summary, pending_summary]))
+    # Resolve git_root on the main thread before handing off to background thread
+    target_dir = _get_active_dir(window) or ""
+    git_root = _find_git_root(target_dir) if target_dir else ""
 
-    result = context.build(window, query, active_file, active_filename, selection, extra_context=extra)
+    extra = pending_summary
+
+    effective_query = api_query or query
+    result = context.build(window, effective_query, active_file, active_filename, selection, extra_context=extra)
     settings = sublime.load_settings("SublimeAssistant.sublime-settings")
     preset = settings.get("active_preset") or ""
     _, _, model, _, _ = _get_api_config(settings)
@@ -346,9 +431,192 @@ def _submit_query(
     })
     threading.Thread(
         target=_call_api,
-        args=(window, panel, result.content, selection_region),
+        args=(window, panel, result.content, selection_region, git_root),
         daemon=True,
     ).start()
+
+
+def _dismiss_inline(block_id: str) -> None:
+    ps = _inline_phantom_sets.pop(block_id, None)
+    if ps:
+        ps.update([])
+
+
+def _accept_inline(block_id: str, window: sublime.Window) -> None:
+    entry = _pending_blocks.pop(block_id, None)
+    if not entry:
+        _dismiss_inline(block_id)
+        return
+    code, filepath, sel_region = entry
+
+    if filepath is not None:
+        target = next(
+            (v for v in window.views()
+             if v.file_name() and os.path.basename(v.file_name()) == os.path.basename(filepath)),
+            None,
+        )
+        if target is None and os.path.isfile(filepath):
+            target = window.open_file(filepath)
+        hint: tuple[int, int] | None = None
+    else:
+        target = window.active_view_in_group(0)
+        hint = tuple(sel_region) if sel_region else None  # type: ignore[arg-type]
+
+    if target:
+        active = window.active_view_in_group(0)
+        active_path = active.file_name() if active else None
+        target_path = target.file_name()
+        selection_is_for_target = (
+            filepath is None
+            or (
+                active_path and target_path
+                and os.path.basename(active_path) == os.path.basename(target_path)
+            )
+        )
+        effective_hint = hint if selection_is_for_target else None
+        orig = target.substr(sublime.Region(0, target.size()))
+        full_proposed = diff_mgr.compute_proposed(orig, code, effective_hint)
+        window.focus_view(target)
+        target.run_command("sublime_assistant_apply_code", {"code": full_proposed})
+
+    _dismiss_inline(block_id)
+
+
+def _on_inline_navigate(href: str, window: sublime.Window) -> None:
+    if href.startswith("accept:"):
+        _accept_inline(href[7:], window)
+    elif href.startswith("diff:"):
+        block_id = href[5:]
+        _dismiss_inline(block_id)
+        _on_apply_navigate(f"apply:{block_id}", window, dismiss_inline=False)
+    elif href.startswith("dismiss:"):
+        _dismiss_inline(href[8:])
+
+
+def _make_inline_html(block_id: str, diff_lines: list[str]) -> str:
+    """Render a colored diff phantom (green additions, red deletions)."""
+    MAX_LINES = 20
+    rows: list[str] = []
+    extra = 0
+    for line in diff_lines:
+        if line.startswith(("--- ", "+++ ")):
+            continue
+        if len(rows) >= MAX_LINES:
+            extra += 1
+            continue
+        text = line.rstrip("\n").replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+        if line.startswith("+"):
+            rows.append(f'<span class="add">{text}</span>')
+        elif line.startswith("-"):
+            rows.append(f'<span class="del">{text}</span>')
+        elif line.startswith("@@"):
+            rows.append(f'<span class="hunk">{text}</span>')
+        else:
+            rows.append(text)
+
+    body = "\n".join(rows)
+    if extra:
+        body += f'\n<span class="hunk">  … {extra} more lines</span>'
+
+    return (
+        '<body id="sa-inline"><style>'
+        "body{margin:0;padding:2px 0;}"
+        "pre{margin:0;padding:3px 8px;font-size:0.9em;white-space:pre;}"
+        ".add{color:#5fbd6a;}"
+        ".del{color:#c75050;}"
+        ".hunk{color:color(var(--foreground) alpha(0.4));}"
+        ".ctrl{padding:3px 0;}"
+        "a{padding:1px 7px;border-radius:2px;text-decoration:none;font-size:0.85em;margin-right:4px;}"
+        ".ok{background:#2d6a2d;color:#fff;}"
+        ".df{background:#1a3a5c;color:#fff;}"
+        ".no{background:#6a2d2d;color:#fff;}"
+        "</style>"
+        f"<pre>{body}</pre>"
+        '<div class="ctrl">'
+        f'<a class="ok" href="accept:{block_id}">&#10003; Accept</a>'
+        f'<a class="df" href="diff:{block_id}">&#8771; Diff</a>'
+        f'<a class="no" href="dismiss:{block_id}">&#10007; Dismiss</a>'
+        "</div></body>"
+    )
+
+
+def _add_inline_phantom(
+    window: sublime.Window,
+    block_id: str,
+    code: str,
+    filepath: str | None,
+    selection_region: list[int] | None,
+) -> None:
+    """Show a diff-style inline suggestion phantom in the editor."""
+    if filepath is not None:
+        target = next(
+            (v for v in window.views()
+             if v.file_name() and os.path.basename(v.file_name()) == os.path.basename(filepath)),
+            None,
+        )
+    else:
+        target = window.active_view_in_group(0)
+
+    if target is None:
+        return
+
+    orig = target.substr(sublime.Region(0, target.size()))
+    orig_lines = orig.splitlines(keepends=True)
+
+    # selection_region is only valid when it was captured from the same file as target.
+    # If the model suggests changes to README.md while a Python file was active, the
+    # selection line numbers refer to the Python file — don't use them for README.md.
+    active = window.active_view_in_group(0)
+    active_path = active.file_name() if active else None
+    target_path = target.file_name()
+    selection_is_for_target = (
+        filepath is None  # no explicit target → always the active file
+        or (
+            active_path and target_path
+            and os.path.basename(active_path) == os.path.basename(target_path)
+        )
+    )
+
+    if selection_region and selection_is_for_target:
+        hint: tuple[int, int] | None = (selection_region[0], selection_region[1])
+    else:
+        hint = diff_mgr.get_snippet_region(orig, code)
+
+    # Compute what the file would look like after applying the suggestion
+    proposed = diff_mgr.compute_proposed(orig, code, hint)
+    proposed_lines = proposed.splitlines(keepends=True)
+
+    # Build unified diff (2 lines of context keeps the phantom compact)
+    diff_lines = list(difflib.unified_diff(orig_lines, proposed_lines, n=2))
+
+    # Find the first changed line from the diff for accurate phantom placement
+    change_line: int | None = None
+    for dl in diff_lines:
+        if dl.startswith("@@"):
+            # Header format: @@ -a,b +c,d @@  — use the +c value (0-indexed)
+            try:
+                plus_part = dl.split("+")[1].split(",")[0].split(" ")[0]
+                change_line = max(0, int(plus_part) - 1)
+            except (IndexError, ValueError):
+                pass
+            break
+
+    if change_line is None:
+        # No diff — snippet identical to original; fall back to cursor/end
+        if target.sel():
+            change_line = target.rowcol(target.sel()[0].begin())[0]
+        else:
+            change_line = target.rowcol(target.size())[0]
+
+    pt = target.text_point(change_line, 0)
+    html = _make_inline_html(block_id, diff_lines)
+
+    ps = sublime.PhantomSet(target, f"sa_inline_{block_id}")
+    _inline_phantom_sets[block_id] = ps
+    ps.update([sublime.Phantom(
+        sublime.Region(pt, pt), html, sublime.LAYOUT_BLOCK,
+        on_navigate=lambda href, w=window: _on_inline_navigate(href, w),
+    )])
 
 
 def _add_apply_phantoms(
@@ -363,6 +631,8 @@ def _add_apply_phantoms(
         return
 
     for block in code_extractor.extract(reply_text):
+        if block.language == "suggested-command":
+            continue
         block_id = f"block_{next(_block_counter)}"
         _pending_blocks[block_id] = (block.content, block.filepath, selection_region)
 
@@ -376,8 +646,11 @@ def _add_apply_phantoms(
             on_navigate=lambda href, w=window: _on_apply_navigate(href, w),
         )
 
+        # Also show inline suggestion phantom in the editor
+        _add_inline_phantom(window, block_id, block.content, block.filepath, selection_region)
 
-def _on_apply_navigate(href: str, window: sublime.Window) -> None:
+
+def _on_apply_navigate(href: str, window: sublime.Window, dismiss_inline: bool = True) -> None:
     """
     Handle navigation to an "Apply" phantom link in the chat panel.
 
@@ -400,6 +673,9 @@ def _on_apply_navigate(href: str, window: sublime.Window) -> None:
     if not entry:
         return
 
+    if dismiss_inline:
+        _dismiss_inline(block_id)
+
     code, filepath, sel_region = entry
 
     if filepath is not None:
@@ -419,7 +695,6 @@ def _on_apply_navigate(href: str, window: sublime.Window) -> None:
     else:
         target = window.active_view_in_group(0)
         if target:
-            # Use the selection region as a precise hint if available
             hint = tuple(sel_region) if sel_region else None
             diff_mgr.open_diff(window, f"diff_{block_id}", target, code, hint_region=hint)
 
@@ -517,7 +792,29 @@ class SublimeAssistantSubmitCommand(sublime_plugin.TextCommand):
             return
 
         self.view.replace(edit, sublime.Region(0, self.view.size()), "")
+        self.view.run_command("sublime_assistant_update_input_hint", {"show": True})
 
+        display_q, api_q, cmd = slash_commands.parse(query)
+
+        # Special commands — act immediately, no API call
+        if cmd == "/init":
+            panel = chat_view.get_or_create(window)
+            if panel:
+                panel.run_command("sublime_assistant_append",
+                                  {"text": "\n---\n\n## 👤 User\n/init\n\n_Crawling project directory…_\n"})
+            window.run_command("sublime_assistant_summarize_directory")
+            return
+
+        if cmd in ("/compact", "/clear"):
+            win_id = window.id()
+            history.clear(win_id)
+            panel = chat_view.get_or_create(window)
+            if panel:
+                panel.run_command("sublime_assistant_append",
+                                  {"text": "\n---\n_Conversation history cleared._\n"})
+            return
+
+        # Resolve git root for git-based commands
         editor = window.active_view_in_group(0)
         if editor:
             active_file     = editor.substr(sublime.Region(0, editor.size()))
@@ -530,13 +827,28 @@ class SublimeAssistantSubmitCommand(sublime_plugin.TextCommand):
                 selection_region: list[int] | None = [start_line, end_line]
             else:
                 selection_region = None
+            active_dir = os.path.dirname(active_filename) if active_filename != "Untitled" else ""
         else:
             active_file, active_filename, selection, selection_region = "", "Untitled", "", None
+            active_dir = ""
+
+        g_root = _find_git_root(active_dir) if active_dir else ""
+
+        if cmd == "/commit":
+            diff = git.get_staged_diff(g_root)
+            api_q += f"\n\n--- STAGED DIFF ---\n{diff or '(no staged changes)'}"
+        elif cmd == "/pr":
+            diff = git.get_diff(g_root)
+            log = git.get_log(g_root)
+            api_q += f"\n\n--- GIT LOG ---\n{log}\n\n--- DIFF ---\n{diff or '(nothing changed)'}"
+        elif cmd == "/diff":
+            diff = git.get_diff(g_root)
+            api_q += f"\n\n--- GIT DIFF ---\n{diff or '(nothing changed)'}"
 
         panel = chat_view.get_or_create(window)
         if panel:
-            _submit_query(window, panel, query, active_file, active_filename,
-                          selection, selection_region)
+            _submit_query(window, panel, display_q, active_file, active_filename,
+                          selection, selection_region, api_query=api_q)
 
 
 class SublimeAssistantAppendCommand(sublime_plugin.TextCommand):
@@ -555,36 +867,44 @@ class SublimeAssistantAppendCommand(sublime_plugin.TextCommand):
         self.view.set_read_only(True)
 
 
+class SublimeAssistantStreamUpdateCommand(sublime_plugin.TextCommand):
+    """Incrementally update the assistant reply during streaming."""
+
+    def run(self, edit, text: str):
+        stream_start = self.view.settings().get("sa_stream_start")
+        if stream_start is None:
+            # Either not yet initialised or already finalised by replace_placeholder.
+            # Distinguish by checking whether the placeholder still exists.
+            region = chat_view.find_placeholder_region(self.view)
+            if region is None:
+                return  # Stale chunk after finalisation — discard.
+            stream_start = region.begin()
+            self.view.settings().set("sa_stream_start", stream_start)
+        self.view.set_read_only(False)
+        self.view.replace(edit, sublime.Region(stream_start, self.view.size()), text)
+        self.view.show(self.view.size())
+        self.view.set_read_only(True)
+
+
 class SublimeAssistantReplacePlaceholderCommand(sublime_plugin.TextCommand):
-    """Replace a placeholder text in the chat panel with assistant response and add application phantoms.
-
-    This command handles two scenarios:
-    1. Replaces the placeholder at the end of the view with the assistant's response text
-    2. If no placeholder is found, simply appends the response text
-
-    The command also triggers the addition of 'Apply' phantoms for any code blocks
-    in the response, allowing users to apply the suggested changes to their code.
-
-    Args:
-        edit: The edit object provided by Sublime Text command system.
-        text: The response text from the assistant to be inserted.
-        selection_region: Optional [start_line, end_line] region for code placement precision.
-
-    Returns:
-        None: This command directly modifies the view through the edit object.
-    """
+    """Replace the placeholder in the chat panel with the assistant response and add Apply phantoms."""
 
     def run(self, edit, text: str, selection_region: list[int] | None = None):
-        """Execute the replacement of placeholder with assistant response text."""
         self.view.set_read_only(False)
-        file_size = self.view.size()
-        region = chat_view.find_placeholder_region(self.view)
-        if region is not None:
-            insert_start = region.begin()
-            self.view.replace(edit, region, text)
+        stream_start = self.view.settings().get("sa_stream_start")
+        if stream_start is not None:
+            insert_start = stream_start
+            self.view.replace(edit, sublime.Region(stream_start, self.view.size()), text)
+            self.view.settings().erase("sa_stream_start")
         else:
-            insert_start = file_size
-            self.view.insert(edit, file_size, text)
+            file_size = self.view.size()
+            region = chat_view.find_placeholder_region(self.view)
+            if region is not None:
+                insert_start = region.begin()
+                self.view.replace(edit, region, text)
+            else:
+                insert_start = file_size
+                self.view.insert(edit, file_size, text)
 
         _add_apply_phantoms(self.view, insert_start, text, selection_region)
         self.view.show(self.view.size())
@@ -701,26 +1021,68 @@ class SublimeAssistantSummarizeDirectoryCommand(sublime_plugin.WindowCommand):
             pass
         sublime.status_message(f"SublimeAssistant: crawling {os.path.basename(git_root)}/...")
 
+        window = self.window
+
+        def _post(text: str) -> None:
+            panel = chat_view.get_or_create(window)
+            if panel:
+                sublime.set_timeout(
+                    lambda: panel.run_command("sublime_assistant_append", {"text": text}), 0
+                )
+
         def crawl_and_enrich() -> None:
             raw, file_contents = summarizer.crawl(git_root)
             cached = f"--- DIRECTORY SUMMARY ---\n{raw}"
             _summary_state[win_id] = (git_root, time.time(), cached)
+            n = len(file_contents)
             if file_contents:
+                _post(f"_Found {n} file{'s' if n != 1 else ''}. Enriching with LLM descriptions…_\n")
                 sublime.set_timeout(
                     lambda: sublime.status_message(
-                        f"SublimeAssistant: enriching {len(file_contents)} files..."
+                        f"SublimeAssistant: enriching {n} files..."
                     ), 0,
                 )
                 _enrich_summary(win_id, git_root, file_contents)
+            _post(
+                f"\n_Directory summary ready for `{os.path.basename(git_root)}/` "
+                f"({n} file{'s' if n != 1 else ''})._\n"
+            )
             sublime.set_timeout(
                 lambda: sublime.status_message(
                     f"SublimeAssistant: summary ready for {os.path.basename(git_root)}/"
                 ), 0,
             )
-            # Print the summary to the console
-            print(cached)
 
         threading.Thread(target=crawl_and_enrich, daemon=True).start()
+
+
+class SublimeAssistantUpdateInputHintCommand(sublime_plugin.TextCommand):
+    """Show or hide the placeholder hint in the input area."""
+
+    def run(self, edit, show: bool = True):
+        ps = _hint_sets.setdefault(self.view.id(), sublime.PhantomSet(self.view, "sa_hint"))
+        if show and self.view.size() == 0:
+            ps.update([sublime.Phantom(
+                sublime.Region(0, 0), _HINT_HTML, sublime.LAYOUT_INLINE
+            )])
+        else:
+            ps.update([])
+
+
+class SublimeAssistantInputListener(sublime_plugin.ViewEventListener):
+    """Show/hide the input hint as the user types."""
+
+    @classmethod
+    def is_applicable(cls, settings: sublime.Settings) -> bool:
+        return bool(settings.get("sublime_assistant_input", False))
+
+    def on_activated(self) -> None:
+        self.view.run_command("sublime_assistant_update_input_hint", {"show": True})
+
+    def on_modified(self) -> None:
+        self.view.run_command(
+            "sublime_assistant_update_input_hint", {"show": self.view.size() == 0}
+        )
 
 
 class SublimeAssistantReloadListener(sublime_plugin.EventListener):

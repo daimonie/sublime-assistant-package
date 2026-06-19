@@ -15,3 +15,8 @@ def append(window_id: int, role: str, content: str) -> None:
     """Append a message to the stored history."""
     if window_id in _store:
         _store[window_id].append({"role": role, "content": content})
+
+
+def clear(window_id: int) -> None:
+    """Remove all history for a window (used by /compact and /clear)."""
+    _store.pop(window_id, None)

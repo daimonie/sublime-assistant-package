@@ -112,6 +112,34 @@ def _find_snippet_region(original: str, snippet: str) -> tuple[int, int] | None:
     return (start, end)
 
 
+def _find_best_match_region(
+    orig_lines: list[str], snippet_lines: list[str]
+) -> tuple[int, int] | None:
+    """Sliding-window search: find the region in orig_lines most similar to snippet_lines."""
+    sn = len(snippet_lines)
+    on = len(orig_lines)
+    if sn == 0 or on == 0 or sn > on:
+        return None
+
+    best_ratio = 0.0
+    best_start = 0
+    # Expand window slightly so partial overlaps at boundaries still match
+    window = max(sn, 4)
+
+    for i in range(on - sn + 1):
+        ratio = SequenceMatcher(
+            None, orig_lines[i : i + window], snippet_lines, autojunk=False
+        ).ratio()
+        if ratio > best_ratio:
+            best_ratio = ratio
+            best_start = i
+
+    # Require at least 30 % similarity; below that the snippet is essentially new content
+    if best_ratio < 0.30:
+        return None
+    return (best_start, best_start + sn)
+
+
 def _compute_proposed_file(
     orig_lines: list[str],
     proposed_code: str,
@@ -120,19 +148,51 @@ def _compute_proposed_file(
     """Return the full proposed file as a line list, merging the snippet smartly."""
     snippet_lines = proposed_code.splitlines(keepends=True)
 
+    # 1. Explicit selection hint — highest priority
     if hint_region:
         start, end = hint_region
         merged = _merge_snippet(orig_lines[start:end], snippet_lines)
         return orig_lines[:start] + merged + orig_lines[end:]
 
-    if len(snippet_lines) < len(orig_lines) * 0.85:
-        region = _find_snippet_region(''.join(orig_lines), proposed_code)
-        if region:
-            start, end = region
-            merged = _merge_snippet(orig_lines[start:end], snippet_lines)
-            return orig_lines[:start] + merged + orig_lines[end:]
+    # 2. Locate by def/class name — works for single-function edits
+    region = _find_snippet_region(''.join(orig_lines), proposed_code)
+    if region:
+        start, end = region
+        merged = _merge_snippet(orig_lines[start:end], snippet_lines)
+        return orig_lines[:start] + merged + orig_lines[end:]
 
-    return snippet_lines   # full-file replacement
+    # 3. Snippet is at least as long as the original — genuine full-file replacement
+    if len(snippet_lines) >= len(orig_lines):
+        return snippet_lines
+
+    # 4. Sliding-window search: find the region that best matches the snippet.
+    #    This handles markdown sections, config stanzas, etc. that have no def/class anchor.
+    region = _find_best_match_region(orig_lines, snippet_lines)
+    if region:
+        start, end = region
+        merged = _merge_snippet(orig_lines[start:end], snippet_lines)
+        return orig_lines[:start] + merged + orig_lines[end:]
+
+    # 5. Cannot determine location — treat as full-file replacement.
+    return snippet_lines
+
+
+def find_snippet_location(original: str, snippet: str) -> int | None:
+    """Return the start line of the def/class in snippet within original, or None."""
+    region = _find_snippet_region(original, snippet)
+    return region[0] if region else None
+
+
+def get_snippet_region(original: str, snippet: str) -> tuple[int, int] | None:
+    """Return (start_line, end_line) of the snippet's def/class in original, or None."""
+    return _find_snippet_region(original, snippet)
+
+
+def compute_proposed(orig: str, proposed_code: str, hint_region: tuple[int, int] | None) -> str:
+    """Return the full merged file content for direct application (no diff view)."""
+    orig_lines = orig.splitlines(keepends=True)
+    new_lines = _compute_proposed_file(orig_lines, proposed_code, hint_region)
+    return "".join(new_lines)
 
 
 # ── Public API ─────────────────────────────────────────────────────────────────

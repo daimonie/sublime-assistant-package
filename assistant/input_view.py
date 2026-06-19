@@ -27,6 +27,12 @@ def get_or_create(window: sublime.Window) -> sublime.View | None:
     view.settings().set("word_wrap", True)
     view.settings().set("line_numbers", False)
     view.settings().set("gutter", False)
+    view.settings().set("spell_check", False)
+    view.settings().set("scroll_past_end", False)
+    view.settings().set("highlight_line", False)
+    view.settings().set("auto_indent", False)
+    view.settings().set("mini_diff", False)
     view.settings().set("sublime_assistant_input", True)
 
+    view.run_command("sublime_assistant_update_input_hint", {"show": True})
     return view
