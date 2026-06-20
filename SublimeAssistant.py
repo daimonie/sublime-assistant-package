@@ -521,7 +521,7 @@ def _make_inline_html(block_id: str, diff_lines: list[str]) -> str:
         '<body id="sa-inline"><style>'
         "body{margin:0;padding:2px 0;}"
         "div.diff{margin:0;font-size:0.9em;}"
-        ".add,.del,.hunk,.ctx{white-space:pre;padding:0 8px;}"
+        ".add,.del,.hunk,.ctx{white-space:pre-wrap;padding:0 8px;}"
         ".add{background:#0d2b14;color:#3fb950;}"
         ".del{background:#2b0d0d;color:#f85149;}"
         ".hunk{color:color(var(--foreground) alpha(0.5));}"
