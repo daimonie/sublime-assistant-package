@@ -506,32 +506,33 @@ def _make_inline_html(block_id: str, diff_lines: list[str]) -> str:
             continue
         text = line.rstrip("\n").replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
         if line.startswith("+"):
-            rows.append(f'<span class="add">{text}</span>')
+            rows.append(f'<div class="add">{text}</div>')
         elif line.startswith("-"):
-            rows.append(f'<span class="del">{text}</span>')
+            rows.append(f'<div class="del">{text}</div>')
         elif line.startswith("@@"):
-            rows.append(f'<span class="hunk">{text}</span>')
+            rows.append(f'<div class="hunk">{text}</div>')
         else:
-            rows.append(text)
+            rows.append(f'<div class="ctx">{text}</div>')
 
-    body = "\n".join(rows)
     if extra:
-        body += f'\n<span class="hunk">  … {extra} more lines</span>'
+        rows.append(f'<div class="hunk">  … {extra} more lines</div>')
 
     return (
         '<body id="sa-inline"><style>'
         "body{margin:0;padding:2px 0;}"
-        "pre{margin:0;padding:3px 8px;font-size:0.9em;white-space:pre;}"
-        ".add{color:#5fbd6a;}"
-        ".del{color:#c75050;}"
-        ".hunk{color:color(var(--foreground) alpha(0.4));}"
-        ".ctrl{padding:3px 0;}"
-        "a{padding:1px 7px;border-radius:2px;text-decoration:none;font-size:0.85em;margin-right:4px;}"
-        ".ok{background:#2d6a2d;color:#fff;}"
-        ".df{background:#1a3a5c;color:#fff;}"
-        ".no{background:#6a2d2d;color:#fff;}"
+        "div.diff{margin:0;font-size:0.9em;}"
+        ".add,.del,.hunk,.ctx{white-space:pre;padding:0 8px;}"
+        ".add{background:#0d2b14;color:#3fb950;}"
+        ".del{background:#2b0d0d;color:#f85149;}"
+        ".hunk{color:color(var(--foreground) alpha(0.5));}"
+        ".ctx{color:color(var(--foreground) alpha(0.85));}"
+        ".ctrl{padding:4px 0 2px 4px;}"
+        "a{padding:2px 10px;border-radius:3px;text-decoration:none;font-size:0.9em;margin-right:6px;font-weight:bold;}"
+        ".ok{background:#238636;color:#fff;}"
+        ".df{background:#1f6feb;color:#fff;}"
+        ".no{background:#da3633;color:#fff;}"
         "</style>"
-        f"<pre>{body}</pre>"
+        f'<div class="diff">{"".join(rows)}</div>'
         '<div class="ctrl">'
         f'<a class="ok" href="accept:{block_id}">&#10003; Accept</a>'
         f'<a class="df" href="diff:{block_id}">&#8771; Diff</a>'

@@ -24,22 +24,22 @@ _SETTING = "sublime_assistant_diff_id"
 _CONTROLS_HTML = """<body id="sa_controls">
 <style>
   body { margin: 4px 0; }
-  a { padding: 3px 10px; border-radius: 3px; text-decoration: none; font-size: 1em; }
-  .ok { background-color: #2d6a2d; color: #fff; }
-  .no { background-color: #6a2d2d; color: #fff; }
+  a { padding: 3px 12px; border-radius: 3px; text-decoration: none; font-size: 1em; font-weight: bold; margin-right: 6px; }
+  .ok { background-color: #238636; color: #fff; }
+  .no { background-color: #da3633; color: #fff; }
 </style>
-<a class="ok" href="accept">&#10003; Accept</a>&nbsp;
+<a class="ok" href="accept">&#10003; Accept</a>
 <a class="no" href="reject">&#10007; Reject</a>
 </body>"""
 
 _CREATE_HTML = """<body id="sa_controls">
 <style>
   body { margin: 4px 0; }
-  a { padding: 3px 10px; border-radius: 3px; text-decoration: none; font-size: 1em; }
-  .ok { background-color: #2d6a2d; color: #fff; }
-  .no { background-color: #6a2d2d; color: #fff; }
+  a { padding: 3px 12px; border-radius: 3px; text-decoration: none; font-size: 1em; font-weight: bold; margin-right: 6px; }
+  .ok { background-color: #238636; color: #fff; }
+  .no { background-color: #da3633; color: #fff; }
 </style>
-<a class="ok" href="accept">&#10003; Create File</a>&nbsp;
+<a class="ok" href="accept">&#10003; Create File</a>
 <a class="no" href="reject">&#10007; Reject</a>
 </body>"""
 
