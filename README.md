@@ -1,10 +1,12 @@
 # SublimeAssistant
 
-**SublimeAssistant** brings Cursor-like AI interaction directly into **Sublime Text 4**.
+**SublimeAssistant** brings AI-powered coding assistance directly into **Sublime Text 4**. Seamlessly connect your editor to a local LLM (via Ollama), the Mistral API, or the Claude (Anthropic) API for a streamlined workflow. Generate code, debug issues, and document projects—all without leaving your keyboard.
 
-It connects your editor to a local LLM (via Ollama), the Mistral API, or the Claude (Anthropic) API, giving you a persistent chat panel, inline code suggestions with one-click accept, file referencing, and streaming responses — without ever leaving the keyboard. Lightweight, thread-safe, and runs on Python 3.8 with no external dependencies.
-
-![License](https://img.shields.io/badge/license-MIT-blue.svg)
+Key features include:
+- A persistent chat panel for context-aware conversations.
+- Inline code suggestions with one-click apply.
+- File referencing and streaming responses.
+- Lightweight, thread-safe, and dependency-free (Python 3.8).
 
 ---
 
@@ -15,24 +17,7 @@ It connects your editor to a local LLM (via Ollama), the Mistral API, or the Cla
 - **streaming responses** — token-by-token display as the model generates, so you see the reply as it arrives.
 - **inline phantom suggestions** — every code block the assistant produces shows a phantom directly in your editor at the target location, with **accept** (instant apply), **≋ diff** (open diff preview), and **dismiss** buttons. no need to leave the editor to review a suggestion.
 - **apply with diff preview** — the **≋ diff** path opens a unified diff showing exactly what changes, with **✓ accept** / **✗ reject** before anything is written to disk.
-- **slash commands** — type a command alone in the input strip to trigger preset prompts or plugin actions:
-
-  | command | what it does |
-  |---------|-------------|
-  | `/explain` | explain the selected code in detail |
-  | `/fix` | identify and fix bugs |
-  | `/tests` | write unit tests for the selected code |
-  | `/review` | code review for correctness, style, and performance |
-  | `/debug` | root-cause analysis and fix proposal |
-  | `/docs` | write docstrings and comments |
-  | `/research` | research a topic using the `fetch_url` tool and cite sources |
-  | `/diff` | explain and review the current working-tree diff |
-  | `/init` | crawl the project directory and build the file-summary cache |
-  | `/compact` | clear the conversation history for this window |
-  | `/clear` | same as `/compact` |
-
-  slash commands must be the **entire input** (e.g. type `/explain` alone, then ctrl+enter). you can append extra context after the command: `/fix there's a race condition in the handler`.
-
+- **slash commands** — type a command alone in the input strip to trigger preset prompts or plugin actions. See the [Slash Commands](#slash-commands) section for details.
 - **project rules** — place an `agents.md` and/or `skills.md` file at the git root. their contents are automatically prepended to the system prompt at the start of each window session, letting you set project-specific instructions, conventions, or personas.
 - **suggested commands** — when the model recommends a shell command to run (tests, linter, build), it outputs it in a `suggested-command` fenced block. the plugin displays it but **never executes it** — you copy and run it yourself.
 - **multi-file referencing** — type `@filename.ext` in the input area to include any open or project file.
@@ -45,9 +30,27 @@ It connects your editor to a local LLM (via Ollama), the Mistral API, or the Cla
 
 ---
 
-## Hardware requirements for local hosting
+## Slash Commands
 
-Running a coding model locally via Ollama requires a **dedicated GPU with enough VRAM**:
+Slash commands are preset prompts or plugin actions triggered by typing a command alone in the input strip (e.g., `/explain`). You can append extra context after the command (e.g., `/fix there's a race condition in the handler`).
+
+| Command | Description |
+|---------|-------------|
+| `/explain` | Explain the selected code in detail. |
+| `/fix` | Identify and fix bugs in the selected code. |
+| `/tests` | Write unit tests for the selected code. |
+| `/review` | Perform a code review for correctness, style, and performance. |
+| `/debug` | Root-cause analysis and fix proposal for the selected code. |
+| `/docs` | Write docstrings and comments for the selected code. |
+| `/research` | Research a topic using the `fetch_url` tool and cite sources. |
+| `/diff` | Explain and review the current working-tree diff. |
+| `/init` | Crawl the project directory and build the file-summary cache. |
+| `/compact` | Clear the conversation history for this window. |
+| `/clear` | Same as `/compact`. |
+
+Slash commands must be the **entire input** (e.g., type `/explain` alone, then press `Ctrl+Enter`).
+
+---
 
 | Model | VRAM needed | Notes |
 |-------|-------------|-------|
@@ -285,18 +288,17 @@ SublimeAssistant/
     ├── summarizer.py          # Crawl git root and produce a code-structure summary
     └── view.py                # Chat panel UI helpers
 ```
-
----
-
 ## Local Development Stack
 
 A `docker-compose.yaml` is included to spin up Ollama + Open WebUI locally with GPU support. This is optional — it is not required for basic plugin use. Ollama runs with `OLLAMA_NUM_CTX=65536` so the fetch_url tool and large conversations are unlikely to get truncated.
+
+To start the services, run the following command in the directory containing the `docker-compose.yaml` file:
 
 ```bash
 docker compose up -d
 ```
 
-Open WebUI is then available at `http://localhost:3000`. Note: for the plugin, always point the **local** preset at Ollama's port (11434), not Open WebUI's port (3000).
+Open WebUI is then available at `http://localhost:3000`. Note: for the plugin, always point the **local** preset at Ollama's port (11434), not Open WebUI's port (3000). Open WebUI is optional and not required for the plugin to function.
 
 ---
 
