@@ -442,6 +442,40 @@ def _dismiss_inline(block_id: str) -> None:
         ps.update([])
 
 
+def _resolve_hint_region(
+    window: sublime.Window,
+    filepath: str | None,
+    sel_region: list[int] | None,
+    target: sublime.View,
+) -> tuple[int, int] | None:
+    """Resolve the (start_line, end_line) hint for locating an edit in `target`.
+
+    Shared by the inline phantom preview (_add_inline_phantom) and the actual
+    Accept mechanism (_accept_inline) so both always compute the exact same
+    proposed content — the preview must never show a different diff than
+    what Accept applies.
+
+    selection_region is only valid when it was captured from the same file as
+    target: if the model suggests changes to README.md while a Python file
+    was active, the selection line numbers refer to the Python file — don't
+    use them for README.md. Any further localization (def/class match,
+    window search) happens uniformly inside diff_mgr.compute_proposed.
+    """
+    active = window.active_view_in_group(0)
+    active_path = active.file_name() if active else None
+    target_path = target.file_name()
+    selection_is_for_target = (
+        filepath is None  # no explicit target → always the active file
+        or (
+            active_path and target_path
+            and os.path.basename(active_path) == os.path.basename(target_path)
+        )
+    )
+    if sel_region and selection_is_for_target:
+        return (sel_region[0], sel_region[1])
+    return None
+
+
 def _accept_inline(block_id: str, window: sublime.Window) -> None:
     entry = _pending_blocks.pop(block_id, None)
     if not entry:
@@ -457,25 +491,13 @@ def _accept_inline(block_id: str, window: sublime.Window) -> None:
         )
         if target is None and os.path.isfile(filepath):
             target = window.open_file(filepath)
-        hint: tuple[int, int] | None = None
     else:
         target = window.active_view_in_group(0)
-        hint = tuple(sel_region) if sel_region else None  # type: ignore[arg-type]
 
     if target:
-        active = window.active_view_in_group(0)
-        active_path = active.file_name() if active else None
-        target_path = target.file_name()
-        selection_is_for_target = (
-            filepath is None
-            or (
-                active_path and target_path
-                and os.path.basename(active_path) == os.path.basename(target_path)
-            )
-        )
-        effective_hint = hint if selection_is_for_target else None
+        hint = _resolve_hint_region(window, filepath, sel_region, target)
         orig = target.substr(sublime.Region(0, target.size()))
-        full_proposed = diff_mgr.compute_proposed(orig, code, effective_hint)
+        full_proposed = diff_mgr.compute_proposed(orig, code, hint)
         window.focus_view(target)
         target.run_command("sublime_assistant_apply_code", {"code": full_proposed})
 
@@ -564,24 +586,10 @@ def _add_inline_phantom(
     orig = target.substr(sublime.Region(0, target.size()))
     orig_lines = orig.splitlines(keepends=True)
 
-    # selection_region is only valid when it was captured from the same file as target.
-    # If the model suggests changes to README.md while a Python file was active, the
-    # selection line numbers refer to the Python file — don't use them for README.md.
-    active = window.active_view_in_group(0)
-    active_path = active.file_name() if active else None
-    target_path = target.file_name()
-    selection_is_for_target = (
-        filepath is None  # no explicit target → always the active file
-        or (
-            active_path and target_path
-            and os.path.basename(active_path) == os.path.basename(target_path)
-        )
-    )
-
-    if selection_region and selection_is_for_target:
-        hint: tuple[int, int] | None = (selection_region[0], selection_region[1])
-    else:
-        hint = diff_mgr.get_snippet_region(orig, code)
+    # Same resolver _accept_inline uses — the preview must always match what
+    # Accept actually applies. Any further localization (def/class match,
+    # window search) happens uniformly inside diff_mgr.compute_proposed.
+    hint = _resolve_hint_region(window, filepath, selection_region, target)
 
     # Compute what the file would look like after applying the suggestion
     proposed = diff_mgr.compute_proposed(orig, code, hint)
