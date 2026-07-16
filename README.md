@@ -1,5 +1,7 @@
 # SublimeAssistant
 
+[![tests](https://github.com/daimonie/sublime-assistant-package/actions/workflows/tests.yml/badge.svg)](https://github.com/daimonie/sublime-assistant-package/actions/workflows/tests.yml)
+
 **SublimeAssistant** brings AI-powered coding assistance directly into **Sublime Text 4**. Seamlessly connect your editor to a local LLM (via Ollama), the Mistral API, or the Claude (Anthropic) API for a streamlined workflow. Generate code, debug issues, and document projects—all without leaving your keyboard.
 
 Key features include:
@@ -15,7 +17,8 @@ Key features include:
 - **context-aware ai** — automatically sends the active file and any selected text with every query.
 - **persistent chat panel** — a dedicated markdown split-pane that keeps the full conversation history per window.
 - **streaming responses** — token-by-token display as the model generates, so you see the reply as it arrives.
-- **inline phantom suggestions** — every code block the assistant produces shows a phantom directly in your editor at the target location, with **accept** (instant apply), **≋ diff** (open diff preview), and **dismiss** buttons. no need to leave the editor to review a suggestion.
+- **inline phantom suggestions** — every code block the assistant produces shows a colored red/green diff phantom directly in your editor at the target location, with **accept** (instant apply), **≋ diff** (open diff preview), and **dismiss** buttons. no need to leave the editor to review a suggestion.
+- **smart, localized merging** — accepting a suggestion never overwrites the whole file. the plugin anchors the snippet to the specific lines it actually changes (via your selection, a matched `def`/`class`, or fuzzy text-anchor localization), so edits, insertions, and deletions elsewhere in the snippet only touch what really changed — everything else in the file is left byte-for-byte alone. the same merge logic drives both the phantom preview and the actual Accept, so what you see is exactly what you get.
 - **apply with diff preview** — the **≋ diff** path opens a unified diff showing exactly what changes, with **✓ accept** / **✗ reject** before anything is written to disk.
 - **slash commands** — type a command alone in the input strip to trigger preset prompts or plugin actions. See the [Slash Commands](#slash-commands) section for details.
 - **project rules** — place an `agents.md` and/or `skills.md` file at the git root. their contents are automatically prepended to the system prompt at the start of each window session, letting you set project-specific instructions, conventions, or personas.
@@ -25,7 +28,7 @@ Key features include:
 - **directory summary (lazy)** — run `/init` or **summarize directory** from the command palette to crawl the git root and build llm-generated per-file descriptions. the summary is cached to `.sublime_assistant_summary.md`. when the model needs project context it calls `list_project_files` / `get_file_summary` rather than having the entire summary injected into every message.
 - **new file creation** — when the llm suggests a brand-new file, the apply workflow lets you review and create it with one click.
 - **preset switching** — switch between a local ollama endpoint, the mistral api, or the claude api from the command palette without touching config files.
-- **auto-reload on save** — when you edit any file in `sublimeassistant/assistant/`, the submodule is hot-reloaded automatically.
+- **auto-reload on save** — when you edit any file in `sublimeassistant/assistant/` *from within Sublime Text*, the submodule is hot-reloaded automatically. editing those files with an external tool (another editor, an AI coding agent) won't trigger this — restart Sublime Text to pick up the change.
 - **asynchronous** — api calls run in a background thread; the editor never freezes.
 
 ---
@@ -251,7 +254,7 @@ The system prompt instructs the model to label code blocks with their target fil
 
 When a filepath is present the Apply / inline phantom workflow targets that file directly. When absent it defaults to the active editor view.
 
-For **partial edits** (one function or class), the model is instructed to include only that function — not the surrounding file — and to add `# ... rest of file unchanged ...` at any truncation point so the plugin can merge the snippet correctly rather than replacing the whole file.
+For **partial edits** (one function, one section, one table) the model is instructed to include only the changed portion and mark any skipped context with a placeholder like `# ... rest of file unchanged ...` or `<!-- ... rest unchanged ... -->` (any common comment style, or a bare `...`, is recognized). The plugin strips these placeholders and locates each real chunk of changed content independently — via your selection, a matched `def`/`class`, or fuzzy text-anchor localization against the surrounding file — so the merge only touches the lines that actually changed. Content the snippet omits (leading or trailing context it didn't bother repeating) is preserved; content it genuinely removes (a line sandwiched between two still-present anchors) is deleted. Both the phantom preview and the actual Accept run this same merge, so the diff you see is exactly what gets written.
 
 ---
 
@@ -262,7 +265,7 @@ For **partial edits** (one function or class), the model is instructed to includ
 - **"truncating input prompt" in Ollama logs:** The fetched page plus your conversation exceeded Ollama's context window. Set `OLLAMA_NUM_CTX=65536` (or higher) in your Ollama environment. Devstral supports up to 384 k tokens.
 - **Model not found / 400 from Mistral:** List valid IDs with `GET https://api.mistral.ai/v1/models`. Set `presets.mistral.model` to `mistral-small-latest` in User settings as a safe fallback.
 - **`/init` does nothing visible:** The command triggers a background crawl and LLM enrichment pass. Check `View → Show Console` for `[SA]` log lines. The enrichment can take 30–60 seconds depending on project size and model speed.
-- **Inline phantom in wrong location:** If the model returns a snippet without a recognisable `def`/`class` name matching the file, the phantom falls back to the cursor position. Make sure you have a selection or cursor near the relevant code before submitting, or add the function name to the snippet.
+- **Inline phantom in wrong location:** Localization is tried in order: your selection, a matched `def`/`class` name, then fuzzy text-anchor matching against the rest of the file. If the snippet shares no recognizable content with the file at all (e.g. a wholesale rewrite with very different wording), it falls back to the cursor position or a full-file replacement. Selecting the text you want changed before submitting is the most reliable way to pin the location exactly.
 
 ---
 
@@ -274,20 +277,33 @@ SublimeAssistant/
 ├── Default.sublime-commands   # Command palette entries
 ├── Default.sublime-keymap     # Ctrl+L, Ctrl+Enter
 ├── .python-version            # Python 3.8
-└── assistant/
-    ├── api.py                 # APIClient base; OpenAIClient + ClaudeClient; streaming; tool loop
-    ├── code_extractor.py      # Parse fenced code blocks from replies
-    ├── context.py             # Build LLM context block from file/selection/@refs
-    ├── diff_view.py           # Diff preview + new-file preview + smart snippet merge
-    ├── file_finder.py         # Locate files across open tabs and project folders
-    ├── git.py                 # Git subprocess helpers (diff, log, status)
-    ├── history.py             # Per-window conversation history
-    ├── input_view.py          # Input area view (bottom-right strip)
-    ├── project_rules.py       # Load AGENTS.md / SKILLS.md from git root
-    ├── slash_commands.py      # Slash command parsing and template expansion
-    ├── summarizer.py          # Crawl git root and produce a code-structure summary
-    └── view.py                # Chat panel UI helpers
+├── assistant/
+│   ├── api.py                 # APIClient base; OpenAIClient + ClaudeClient; streaming; tool loop
+│   ├── code_extractor.py      # Parse fenced code blocks from replies
+│   ├── context.py             # Build LLM context block from file/selection/@refs
+│   ├── diff_view.py           # Diff preview + new-file preview + smart snippet merge
+│   ├── file_finder.py         # Locate files across open tabs and project folders
+│   ├── git.py                 # Git subprocess helpers (diff, log, status)
+│   ├── history.py             # Per-window conversation history
+│   ├── input_view.py          # Input area view (bottom-right strip)
+│   ├── project_rules.py       # Load AGENTS.md / SKILLS.md from git root
+│   ├── slash_commands.py      # Slash command parsing and template expansion
+│   ├── summarizer.py          # Crawl git root and produce a code-structure summary
+│   └── view.py                # Chat panel UI helpers
+└── tests/                     # Unit test suite (pytest) — see Testing below
 ```
+
+## Testing
+
+The `sublime` module only exists inside Sublime Text's embedded Python, so the test suite stubs it (`tests/conftest.py`) to unit-test the plugin's pure logic — snippet merging, code block extraction, slash commands, history, project rules — outside the editor. `assistant/diff_view.py` (the merge/localization engine behind Accept and the phantom preview) has the deepest coverage, including a regression test built from a real bug report so that class of failure can't silently come back.
+
+```bash
+pip install pytest
+pytest tests/ -v
+```
+
+CI (`.github/workflows/tests.yml`) runs the suite on every push and PR to `main`, against Python 3.8 (matching `.python-version`, what Sublime Text actually runs) and 3.12 (forward-compatibility check).
+
 ## Local Development Stack
 
 A `docker-compose.yaml` is included to spin up Ollama + Open WebUI locally with GPU support. This is optional — it is not required for basic plugin use. Ollama runs with `OLLAMA_NUM_CTX=65536` so the fetch_url tool and large conversations are unlikely to get truncated.

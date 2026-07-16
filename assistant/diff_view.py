@@ -196,7 +196,7 @@ def _locate_window(
         return None
 
     # Pass 1: high-confidence core anchors via global search.
-    anchors: list[tuple[int, int]] = []
+    anchors: list[tuple[int, int, float]] = []
     for content_idx, line in enumerate(content_lines):
         if _is_trivial_line(line):
             continue
@@ -210,10 +210,26 @@ def _locate_window(
                 if ratio == 1.0:
                     break
         if best_idx is not None and best_ratio >= _ANCHOR_RATIO_THRESHOLD:
-            anchors.append((content_idx, best_idx))
+            anchors.append((content_idx, best_idx, best_ratio))
 
     if not anchors:
         return None
+
+    # Keep only anchors positionally consistent with the single strongest
+    # match. A short, generic content line (e.g. "NEW body.") can score
+    # above the threshold against a coincidentally similar but unrelated
+    # line elsewhere in a large, repetitive document; left in, a single
+    # stray anchor like that blows the window open across everything
+    # between it and the real edit. A genuine multi-anchor match moves
+    # through orig_lines in step with content order, so anything whose
+    # orig-position offset from the seed doesn't track its content-index
+    # offset is a coincidence, not part of this edit.
+    seed_content_idx, seed_orig_idx, _ = max(anchors, key=lambda a: a[2])
+    tolerance = max(len(content_lines), 10)
+    anchors = [
+        a for a in anchors
+        if abs((a[1] - seed_orig_idx) - (a[0] - seed_content_idx)) <= tolerance
+    ]
 
     orig_positions = [a[1] for a in anchors]
     start = min(orig_positions)
