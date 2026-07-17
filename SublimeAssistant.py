@@ -57,7 +57,6 @@ _STOP_HINT_HTML = (
     '<span class="hint"><i>Ctrl+C</i> also works</span></body>'
 )
 
-_DEFAULT_SUMMARY_INTERVAL = 1800  # seconds (30 minutes)
 _ENRICH_MAX_FILE_CHARS = 3000  # chars of each file sent to LLM for description
 _SUMMARY_MODEL_OPENAI = "mistral-small-latest"  # fast model for summarization on non-Claude backends
 
@@ -151,48 +150,6 @@ def _enrich_summary(win_id: int, target_dir: str, file_contents: dict[str, str])
             sublime.set_timeout(lambda: sublime.active_window().run_command("refresh_folder_list"), 0)
         except Exception as e:
             print(f"[SA] could not write summary cache: {e}")
-
-
-def _auto_summary_context(window: sublime.Window) -> str:
-    """Return the cached directory summary, re-crawling only when the interval has elapsed."""
-    settings = sublime.load_settings("SublimeAssistant.sublime-settings")
-    interval = int(settings.get("summary_interval") or _DEFAULT_SUMMARY_INTERVAL)
-
-    target_dir = _get_active_dir(window)
-    if not target_dir:
-        return ""
-
-    git_root = _find_git_root(target_dir)
-    win_id = window.id()
-    now = time.time()
-    last_dir, last_time, cached = _summary_state.get(win_id, ("", 0.0, ""))
-
-    if git_root == last_dir and (now - last_time) < interval:
-        return cached
-
-    # Try persistent file cache before crawling
-    summary_file = os.path.join(git_root, ".sublime_assistant_summary.md")
-    if os.path.isfile(summary_file):
-        try:
-            with open(summary_file, encoding="utf-8") as f:
-                cached = f.read()
-            _summary_state[win_id] = (git_root, now, cached)
-            print(f"[SA] loaded summary from {summary_file}")
-            return cached
-        except Exception:
-            pass
-
-    raw, file_contents = summarizer.crawl(git_root)
-    cached = f"--- DIRECTORY SUMMARY ---\n{raw}"
-    _summary_state[win_id] = (git_root, now, cached)
-    if file_contents:
-        threading.Thread(
-            target=_enrich_summary,
-            args=(win_id, git_root, file_contents),
-            daemon=True,
-        ).start()
-
-    return cached
 
 
 def plugin_unloaded() -> None:
@@ -510,18 +467,12 @@ def _submit_query(
     Returns:
         None: Operations are performed asynchronously via callbacks.
     """
-    pending_summary = window.settings().get("sa_pending_summary") or ""
-    if pending_summary:
-        window.settings().erase("sa_pending_summary")
-
     # Resolve git_root on the main thread before handing off to background thread
     target_dir = _get_active_dir(window) or ""
     git_root = _find_git_root(target_dir) if target_dir else ""
 
-    extra = pending_summary
-
     effective_query = api_query or query
-    result = context.build(window, effective_query, active_file, active_filename, selection, extra_context=extra)
+    result = context.build(window, effective_query, active_file, active_filename, selection)
     settings = sublime.load_settings("SublimeAssistant.sublime-settings")
     preset = settings.get("active_preset") or ""
     _, _, model, _, _ = _get_api_config(settings)

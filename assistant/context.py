@@ -6,7 +6,7 @@ from typing import NamedTuple
 
 import sublime
 
-from .api import fetch_url
+from .api import fetch_url, wrap_fetched_content
 from .file_finder import find as find_file
 
 _REF_PATTERN = re.compile(r"@([\w.\-]+\.[\w\-]+)")
@@ -48,7 +48,8 @@ def build(
 
     for url in _URL_PATTERN.findall(query):
         content, ok = fetch_url(url)
-        parts.append(f"--- FETCHED URL: {url} ---\n{content}")
+        body = wrap_fetched_content(content) if ok else content
+        parts.append(f"--- FETCHED URL: {url} ---\n{body}")
         hints.append(f"url:{url}" if ok else f"url:{url} (failed)")
 
     if selection:
