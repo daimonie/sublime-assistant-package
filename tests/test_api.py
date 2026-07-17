@@ -296,6 +296,53 @@ class TestDispatchTool:
         )
         assert result == "Unknown tool: read_file"
 
+    def test_fetch_url_denied_by_on_fetch_confirm_never_calls_fetch_url(self):
+        """The harness-side gate: on_fetch_confirm returning False must stop the
+        request before fetch_url runs — this is enforced in code, not left to the
+        model to respect a prompt instruction."""
+        with patch("assistant.api.fetch_url") as mock_fetch_url:
+            result = api._dispatch_tool(
+                "fetch_url", json.dumps({"url": "http://example.com"}),
+                on_tool_call=None, on_read_file=None, on_list_files=None,
+                on_get_file_summary=None, on_fetch_confirm=lambda url: False,
+            )
+        mock_fetch_url.assert_not_called()
+        assert "denied" in result.lower()
+
+    def test_fetch_url_allowed_by_on_fetch_confirm_proceeds(self):
+        confirm_calls = []
+        with patch("assistant.api.fetch_url", return_value=("page body", True)):
+            result = api._dispatch_tool(
+                "fetch_url", json.dumps({"url": "http://example.com"}),
+                on_tool_call=None, on_read_file=None, on_list_files=None,
+                on_get_file_summary=None,
+                on_fetch_confirm=lambda url: confirm_calls.append(url) or True,
+            )
+        assert confirm_calls == ["http://example.com"]
+        assert "page body" in result
+
+    def test_fetch_url_without_on_fetch_confirm_is_unaffected(self):
+        """Backward compatible: callers that don't wire up confirmation (e.g. no UI
+        available) see the pre-existing behavior, not a silent denial."""
+        with patch("assistant.api.fetch_url", return_value=("page body", True)):
+            result = api._dispatch_tool(
+                "fetch_url", json.dumps({"url": "http://example.com"}),
+                on_tool_call=None, on_read_file=None, on_list_files=None,
+                on_get_file_summary=None, on_fetch_confirm=None,
+            )
+        assert "page body" in result
+
+    def test_on_tool_call_still_fires_even_when_denied(self):
+        """The UI should still show that a fetch was attempted, even if it's denied."""
+        calls = []
+        result = api._dispatch_tool(
+            "fetch_url", json.dumps({"url": "http://example.com"}),
+            on_tool_call=lambda n, a: calls.append((n, a)),
+            on_read_file=None, on_list_files=None, on_get_file_summary=None,
+            on_fetch_confirm=lambda url: False,
+        )
+        assert calls == [("fetch_url", "http://example.com")]
+
 
 # ── wrap_fetched_content: prompt-injection defense for fetch_url ─────────
 
@@ -612,6 +659,47 @@ class TestCall:
                     on_tool_call=lambda n, a: calls.append((n, a)),
                 )
         assert calls == [("fetch_url", "http://example.com")]
+
+    def test_denied_fetch_never_hits_the_network_but_call_still_completes(self):
+        """End-to-end through the tool-round loop (non-streaming): a denied fetch_url
+        must not reach fetch_url at all, and the model gets a denial message back so
+        it can respond to the user instead of retrying forever."""
+        first = json.dumps({
+            "choices": [{"message": {
+                "content": None,
+                "tool_calls": [{"id": "1", "function": {"name": "fetch_url", "arguments": json.dumps({"url": "http://evil.example.com"})}}],
+            }}]
+        }).encode()
+        second = json.dumps({"choices": [{"message": {"content": "okay, I won't fetch that"}}]}).encode()
+
+        with patch("urllib.request.urlopen", side_effect=[FakeResponse(first), FakeResponse(second)]):
+            with patch("assistant.api.fetch_url") as mock_fetch_url:
+                reply, ok = api.call(
+                    "http://x", "", "m", [{"role": "user", "content": "hi"}],
+                    tools=[api.FETCH_URL_TOOL],
+                    on_fetch_confirm=lambda url: False,
+                )
+        mock_fetch_url.assert_not_called()
+        assert ok is True
+        assert reply == "okay, I won't fetch that"
+
+    def test_streaming_denied_fetch_never_hits_the_network(self):
+        tool_lines = _sse({"choices": [{"delta": {"tool_calls": [
+            {"index": 0, "id": "1", "function": {"name": "fetch_url", "arguments": json.dumps({"url": "http://evil.example.com"})}}
+        ]}}]})
+        final_lines = _sse({"choices": [{"delta": {"content": "declined"}}]})
+        responses = [FakeResponse(lines=tool_lines), FakeResponse(lines=final_lines)]
+
+        with patch("urllib.request.urlopen", side_effect=responses):
+            with patch("assistant.api.fetch_url") as mock_fetch_url:
+                reply, ok = api.call(
+                    "http://x", "", "m", [{"role": "user", "content": "hi"}],
+                    tools=[api.FETCH_URL_TOOL], on_chunk=lambda t: None,
+                    on_fetch_confirm=lambda url: False,
+                )
+        mock_fetch_url.assert_not_called()
+        assert ok is True
+        assert reply == "declined"
 
 
 # ── Claude message/tool format conversion ─────────────────────────────────

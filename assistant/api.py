@@ -353,6 +353,12 @@ def _do_request(
         return None, "\n".join(err), False
 
 
+_FETCH_DENIED_MESSAGE = (
+    "Error: the user denied permission to fetch this URL. Do not retry it or attempt "
+    "another URL to work around the denial — proceed without it, or ask the user directly."
+)
+
+
 def _dispatch_tool(
     name: str,
     args: str,
@@ -361,6 +367,7 @@ def _dispatch_tool(
     on_list_files: Callable[[], str] | None,
     on_get_file_summary: Callable[[str], str] | None,
     on_load_skill: Callable[[str], str] | None = None,
+    on_fetch_confirm: Callable[[str], bool] | None = None,
 ) -> str:
     """Execute one tool call and return the result string."""
     if name == "list_project_files" and on_list_files:
@@ -395,13 +402,21 @@ def _dispatch_tool(
         except Exception as e:
             return f"Error reading file: {e}"
     # fetch_url and unknown tools
-    if on_tool_call and name == "fetch_url":
+    if name == "fetch_url":
         try:
             fetch_url_arg = (json.loads(args).get("url") or "").strip()
-            if fetch_url_arg:
-                on_tool_call(name, fetch_url_arg)
         except Exception:
-            on_tool_call(name, args)
+            fetch_url_arg = ""
+        if on_tool_call:
+            on_tool_call(name, fetch_url_arg or args)
+        # Gate enforced by the harness, not the model: a model-initiated fetch_url call
+        # (as opposed to a URL the user typed themselves, which never reaches this
+        # function — see context.py) must be explicitly approved by the user before the
+        # request runs. Prompt text alone can't be trusted to stop this since the very
+        # thing being gated is untrusted content that could try to talk the model out
+        # of asking, or into fetching, on its own.
+        if fetch_url_arg and on_fetch_confirm and not on_fetch_confirm(fetch_url_arg):
+            return _FETCH_DENIED_MESSAGE
     return _run_tool(name, args)
 
 
@@ -490,12 +505,16 @@ def call(
     on_list_files: Callable[[], str] | None = None,
     on_get_file_summary: Callable[[str], str] | None = None,
     on_load_skill: Callable[[str], str] | None = None,
+    on_fetch_confirm: Callable[[str], bool] | None = None,
     on_chunk: Callable[[str], None] | None = None,
     timeout_seconds: int | None = None,
     cancel_event: threading.Event | None = None,
 ) -> tuple[str, bool]:
     """Send messages to the API; if the model returns tool_calls, run them and continue. Returns (reply_text, success).
     If on_tool_call is set, it is called as on_tool_call(tool_name, url_or_args) before running fetch_url (so the UI can show 'Fetching ...').
+    If on_fetch_confirm is set, it is called as on_fetch_confirm(url) before each model-initiated fetch_url call actually
+    runs; a False return denies the fetch. This is the harness-side enforcement point for the tool — it must not be
+    something the model can be talked out of via text in the prompt or in previously-fetched content.
     timeout_seconds: if set, overrides the default request timeout (useful for slow local models or long context).
     cancel_event: if set, checked before each request/tool round and mid-stream; an early stop is treated as a
     normal completion with whatever text has been produced so far."""
@@ -533,7 +552,7 @@ def call(
                 args = fn.get("arguments") or "{}"
                 result_text = _dispatch_tool(
                     name, args, on_tool_call, on_read_file, on_list_files, on_get_file_summary,
-                    on_load_skill,
+                    on_load_skill, on_fetch_confirm,
                 )
                 tools_invoked.append((name, len(result_text)))
                 current_messages.append({"role": "tool", "tool_call_id": tc_id, "content": result_text})
@@ -573,7 +592,7 @@ def call(
             args = fn.get("arguments") or "{}"
             result_text = _dispatch_tool(
                 name, args, on_tool_call, on_read_file, on_list_files, on_get_file_summary,
-                on_load_skill,
+                on_load_skill, on_fetch_confirm,
             )
             tools_invoked.append((name, len(result_text)))
             current_messages.append({
@@ -761,6 +780,7 @@ class APIClient(abc.ABC):
         on_list_files: Callable[[], str] | None = None,
         on_get_file_summary: Callable[[str], str] | None = None,
         on_load_skill: Callable[[str], str] | None = None,
+        on_fetch_confirm: Callable[[str], bool] | None = None,
         on_chunk: Callable[[str], None] | None = None,
         cancel_event: threading.Event | None = None,
     ) -> tuple[str, bool]:
@@ -789,6 +809,7 @@ class OpenAIClient(APIClient):
         on_list_files: Callable[[], str] | None = None,
         on_get_file_summary: Callable[[str], str] | None = None,
         on_load_skill: Callable[[str], str] | None = None,
+        on_fetch_confirm: Callable[[str], bool] | None = None,
         on_chunk: Callable[[str], None] | None = None,
         cancel_event: threading.Event | None = None,
     ) -> tuple[str, bool]:
@@ -803,6 +824,7 @@ class OpenAIClient(APIClient):
             on_list_files=on_list_files,
             on_get_file_summary=on_get_file_summary,
             on_load_skill=on_load_skill,
+            on_fetch_confirm=on_fetch_confirm,
             on_chunk=on_chunk,
             timeout_seconds=self.timeout_seconds,
             cancel_event=cancel_event,
@@ -842,6 +864,7 @@ class ClaudeClient(APIClient):
         on_list_files: Callable[[], str] | None = None,
         on_get_file_summary: Callable[[str], str] | None = None,
         on_load_skill: Callable[[str], str] | None = None,
+        on_fetch_confirm: Callable[[str], bool] | None = None,
         on_chunk: Callable[[str], None] | None = None,
         cancel_event: threading.Event | None = None,
     ) -> tuple[str, bool]:
@@ -893,7 +916,7 @@ class ClaudeClient(APIClient):
                     inp = block.get("input") or {}
                     result_text = _dispatch_tool(
                         name, json.dumps(inp), on_tool_call, on_read_file, on_list_files, on_get_file_summary,
-                        on_load_skill,
+                        on_load_skill, on_fetch_confirm,
                     )
                     tools_invoked.append((name, len(result_text)))
                     tool_results.append({
@@ -961,7 +984,7 @@ class ClaudeClient(APIClient):
                 inp = block.get("input") or {}
                 result_text = _dispatch_tool(
                     name, json.dumps(inp), on_tool_call, on_read_file, on_list_files, on_get_file_summary,
-                    on_load_skill,
+                    on_load_skill, on_fetch_confirm,
                 )
                 tools_invoked.append((name, len(result_text)))
                 tool_results.append({

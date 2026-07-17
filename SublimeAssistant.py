@@ -9,6 +9,7 @@ import os
 import sys
 import threading
 import time
+import urllib.parse
 
 import sublime
 import sublime_plugin
@@ -38,6 +39,19 @@ _active_requests: dict[int, threading.Event] = {}
 # window_id -> current goal text, set by /goal and consumed/refreshed by /loop
 _goal_state: dict[int, str] = {}
 
+# window_id -> domains the user has approved fetch_url for, this session (cleared by
+# /compact and naturally reset on restart — see _confirm_fetch_url)
+_fetch_approvals: dict[int, set[str]] = {}
+
+# fetch_id -> (event, result_box) for a fetch_url approval prompt awaiting a click
+_pending_fetch_confirms: dict[str, tuple[threading.Event, dict]] = {}
+
+# fetch_id -> PhantomSet for the Allow/Deny prompt in the chat panel
+_fetch_confirm_phantom_sets: dict[str, sublime.PhantomSet] = {}
+
+# How long a fetch_url approval prompt waits for a click before defaulting to deny.
+_FETCH_CONFIRM_TIMEOUT = 120
+
 _HINT_HTML = (
     '<body id="sa-hint"><style>'
     'body { margin: 0; padding: 2px 0;'
@@ -56,6 +70,30 @@ _STOP_HINT_HTML = (
     '</style><a href="interrupt:">&#9209; Stop generating</a> '
     '<span class="hint"><i>Ctrl+C</i> also works</span></body>'
 )
+
+def _make_fetch_confirm_html(fetch_id: str, url: str) -> str:
+    """Render the Allow/Deny prompt shown in the chat panel before a model-initiated
+    fetch_url call is allowed to run. This is the user-facing half of the harness-side
+    gate in api.py's on_fetch_confirm — the fetch is blocked in code until one of these
+    links is clicked (or the prompt times out and defaults to deny)."""
+    safe_url = url.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+    return (
+        '<body id="sa_fetch_confirm"><style>'
+        "body{margin:4px 0;padding:4px 8px;border-radius:3px;"
+        "background:color(var(--foreground) alpha(0.06));}"
+        ".url{font-family:monospace;font-size:0.9em;word-break:break-all;margin-bottom:4px;}"
+        "a{padding:2px 10px;border-radius:3px;text-decoration:none;font-size:0.9em;"
+        "margin-right:6px;font-weight:bold;}"
+        ".ok{background:#238636;color:#fff;}"
+        ".no{background:#da3633;color:#fff;}"
+        "</style>"
+        f'<div class="url">🌐 The model wants to fetch: {safe_url}</div>'
+        '<div>'
+        f'<a class="ok" href="fetch_allow:{fetch_id}">&#10003; Allow</a>'
+        f'<a class="no" href="fetch_deny:{fetch_id}">&#10007; Deny</a>'
+        "</div></body>"
+    )
+
 
 _ENRICH_MAX_FILE_CHARS = 3000  # chars of each file sent to LLM for description
 _SUMMARY_MODEL_OPENAI = "mistral-small-latest"  # fast model for summarization on non-Claude backends
@@ -266,6 +304,92 @@ def _append_and_wait(panel: sublime.View, text: str) -> None:
     done.wait(5)
 
 
+def _dismiss_fetch_confirm(fetch_id: str) -> None:
+    ps = _fetch_confirm_phantom_sets.pop(fetch_id, None)
+    if ps:
+        ps.update([])
+
+
+def _resolve_fetch_confirm(fetch_id: str, allow: bool) -> None:
+    entry = _pending_fetch_confirms.pop(fetch_id, None)
+    _dismiss_fetch_confirm(fetch_id)
+    if not entry:
+        return
+    event, result = entry
+    result["allow"] = allow
+    event.set()
+
+
+def _on_fetch_confirm_navigate(href: str, window: sublime.Window) -> None:
+    if href.startswith("fetch_allow:"):
+        _resolve_fetch_confirm(href[len("fetch_allow:"):], True)
+    elif href.startswith("fetch_deny:"):
+        _resolve_fetch_confirm(href[len("fetch_deny:"):], False)
+
+
+def _confirm_fetch_url(
+    window: sublime.Window,
+    panel: sublime.View,
+    win_id: int,
+    url: str,
+    cancel_event: threading.Event | None = None,
+) -> bool:
+    """Harness-side gate for a model-initiated fetch_url call (wired in as api.py's
+    on_fetch_confirm). Blocks the calling (background) thread until the user clicks
+    Allow/Deny in the chat panel, the prompt times out, or the request itself is
+    interrupted (Stop generating) — all three default to deny, the fail-safe
+    direction. This is enforced here in code: nothing about it depends on the model
+    choosing to ask, or on trusting text in the prompt or in previously fetched
+    content, which is exactly what a prompt injection would try to talk it out of
+    respecting.
+
+    A URL the user types directly into the input pane never reaches this function —
+    see context.py's own, unguarded fetch — so approving here only ever applies to
+    fetches the model decided to make on its own.
+    """
+    domain = urllib.parse.urlparse(url).netloc or url
+    if domain in _fetch_approvals.get(win_id, set()):
+        return True
+
+    fetch_id = f"fetch_{next(_block_counter)}"
+    event = threading.Event()
+    result: dict = {"allow": False}
+    _pending_fetch_confirms[fetch_id] = (event, result)
+
+    def _show() -> None:
+        html = _make_fetch_confirm_html(fetch_id, url)
+        region = chat_view.find_placeholder_region(panel)
+        pt = region.begin() if region is not None else panel.size()
+        ps = sublime.PhantomSet(panel, f"sa_fetch_confirm_{fetch_id}")
+        _fetch_confirm_phantom_sets[fetch_id] = ps
+        ps.update([sublime.Phantom(
+            sublime.Region(pt, pt), html, sublime.LAYOUT_BLOCK,
+            on_navigate=lambda href, w=window: _on_fetch_confirm_navigate(href, w),
+        )])
+
+    sublime.set_timeout(_show, 0)
+
+    # Poll in short slices (rather than one long event.wait) so an interrupt mid-wait
+    # is noticed promptly instead of leaving the prompt hanging for the full timeout.
+    deadline = time.time() + _FETCH_CONFIRM_TIMEOUT
+    responded = False
+    while time.time() < deadline:
+        if cancel_event is not None and cancel_event.is_set():
+            break
+        if event.wait(0.2):
+            responded = True
+            break
+
+    _pending_fetch_confirms.pop(fetch_id, None)
+
+    if not responded or not result["allow"]:
+        sublime.set_timeout(lambda: _dismiss_fetch_confirm(fetch_id), 0)
+        return False
+
+    _fetch_approvals.setdefault(win_id, set()).add(domain)
+    return True
+
+
 def _call_api_core(
     window: sublime.Window,
     panel: sublime.View,
@@ -379,6 +503,9 @@ def _call_api_core(
             0,
         )
 
+    def on_fetch_confirm(fetch_url_arg: str) -> bool:
+        return _confirm_fetch_url(window, panel, win_id, fetch_url_arg, cancel_event)
+
     client = _make_client(url, api_key, model, request_timeout, backend)
     reply, success = client.call(
         messages, tools=tools,
@@ -387,6 +514,7 @@ def _call_api_core(
         on_list_files=on_list_files,
         on_get_file_summary=on_get_file_summary,
         on_load_skill=on_load_skill,
+        on_fetch_confirm=on_fetch_confirm,
         on_chunk=on_chunk,
         cancel_event=cancel_event,
     )
@@ -972,6 +1100,7 @@ class SublimeAssistantSubmitCommand(sublime_plugin.TextCommand):
         if cmd in ("/compact", "/clear"):
             history.clear(win_id)
             _goal_state.pop(win_id, None)
+            _fetch_approvals.pop(win_id, None)
             panel = chat_view.get_or_create(window)
             if panel:
                 panel.run_command("sublime_assistant_append",

@@ -12,6 +12,8 @@ from __future__ import annotations
 
 import json
 import sys
+import threading
+import time
 from unittest.mock import patch
 
 import pytest
@@ -487,3 +489,279 @@ class TestCallApiCore:
         args = mock_make_client.call_args[0]
         assert args[4] == "claude"  # backend positional arg
         assert args[2] == "claude-x"  # model positional arg
+
+    def test_wires_a_working_on_fetch_confirm_into_the_client(self):
+        """_call_api_core must hand the client a real on_fetch_confirm callback (not
+        None / omitted) — that's the harness-side enforcement point from api.py's
+        fetch_url gate. A previously-approved domain should resolve through it
+        without blocking."""
+        window = FakeWindow(window_id=3005)
+        panel = window.new_file()
+        fake_client = self._FakeClient()
+        sa._fetch_approvals[window.id()] = {"example.com"}
+        try:
+            with patch("sublime.load_settings", return_value=self._settings()), \
+                 patch.object(sa, "_make_client", return_value=fake_client):
+                sa._call_api_core(window, panel, "hi", "", None)
+
+            confirm = fake_client.received_kwargs.get("on_fetch_confirm")
+            assert callable(confirm)
+            assert confirm("http://example.com/anything") is True
+        finally:
+            sa._fetch_approvals.pop(window.id(), None)
+
+
+# ── True end-to-end: real _call_api_core + real api.call() tool loop + a
+# simulated Allow click, with only the network (urlopen) and fetch_url mocked.
+# Everything else in this test is the actual production code path — this is
+# what proves an Allow click really does let the fetch happen and its content
+# really does reach the model's next round, not just that the two halves work
+# in isolation.
+
+class _FakeStreamResponse:
+    """SSE-style stand-in for urlopen()'s streaming response (matches api.py's
+    _do_request_streaming, which reads `for raw in resp: ...`)."""
+
+    def __init__(self, lines: list[bytes]):
+        self._lines = lines
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *args):
+        return False
+
+    def __iter__(self):
+        return iter(self._lines)
+
+
+def _sse_lines(*events: dict) -> list[bytes]:
+    lines = [f"data: {json.dumps(ev)}\n".encode() for ev in events]
+    lines.append(b"data: [DONE]\n")
+    return lines
+
+
+class TestConfirmFetchUrlEndToEndThroughRealApiCall:
+    def _settings(self):
+        return FakeSettings({
+            "active_preset": None,
+            "system_prompt": "You are helpful.",
+            "request_timeout": 60,
+            "presets": {},
+        })
+
+    def _click_allow_when_prompted(self):
+        for _ in range(200):
+            if sa._pending_fetch_confirms:
+                break
+            time.sleep(0.005)
+        fetch_id = next(iter(sa._pending_fetch_confirms))
+        sa._resolve_fetch_confirm(fetch_id, True)
+
+    def test_allowed_fetch_actually_runs_and_its_content_reaches_the_final_reply(self):
+        window = FakeWindow(window_id=7001)
+        panel = window.new_file()
+        panel._content = "## 🤖 Assistant\n> _Thinking..._"
+
+        tool_round = _sse_lines({"choices": [{"delta": {"tool_calls": [
+            {"index": 0, "id": "1", "function": {
+                "name": "fetch_url",
+                "arguments": json.dumps({"url": "http://allowed-site.example.com/docs"}),
+            }},
+        ]}}]})
+        final_round = _sse_lines({"choices": [{"delta": {"content": "Per the page: 42."}}]})
+        responses = [_FakeStreamResponse(tool_round), _FakeStreamResponse(final_round)]
+
+        t = threading.Thread(target=self._click_allow_when_prompted, daemon=True)
+        t.start()
+        try:
+            with patch("sublime.load_settings", return_value=self._settings()), \
+                 patch("urllib.request.urlopen", side_effect=responses), \
+                 patch.object(sa.api, "fetch_url", return_value=("The answer is 42.", True)) as mock_fetch_url:
+                reply, success = sa._call_api_core(window, panel, "what does the linked doc say?", "", None)
+        finally:
+            t.join(5)
+
+        assert success is True
+        mock_fetch_url.assert_called_once_with("http://allowed-site.example.com/docs")
+        assert reply.startswith("Per the page: 42.")
+        assert "fetched `http://allowed-site.example.com/docs`" in reply
+        assert "allowed-site.example.com" in sa._fetch_approvals.get(window.id(), set())
+        sa._fetch_approvals.pop(window.id(), None)
+
+    def test_denied_fetch_never_runs_and_model_gets_a_denial_it_can_respond_to(self):
+        window = FakeWindow(window_id=7002)
+        panel = window.new_file()
+        panel._content = "## 🤖 Assistant\n> _Thinking..._"
+
+        tool_round = _sse_lines({"choices": [{"delta": {"tool_calls": [
+            {"index": 0, "id": "1", "function": {
+                "name": "fetch_url",
+                "arguments": json.dumps({"url": "http://denied-site.example.com/docs"}),
+            }},
+        ]}}]})
+        final_round = _sse_lines({"choices": [{"delta": {"content": "Okay, I won't fetch that."}}]})
+        responses = [_FakeStreamResponse(tool_round), _FakeStreamResponse(final_round)]
+
+        def _click_deny_when_prompted():
+            for _ in range(200):
+                if sa._pending_fetch_confirms:
+                    break
+                time.sleep(0.005)
+            fetch_id = next(iter(sa._pending_fetch_confirms))
+            sa._resolve_fetch_confirm(fetch_id, False)
+
+        t = threading.Thread(target=_click_deny_when_prompted, daemon=True)
+        t.start()
+        try:
+            with patch("sublime.load_settings", return_value=self._settings()), \
+                 patch("urllib.request.urlopen", side_effect=responses), \
+                 patch.object(sa.api, "fetch_url") as mock_fetch_url:
+                reply, success = sa._call_api_core(window, panel, "fetch that link", "", None)
+        finally:
+            t.join(5)
+
+        assert success is True
+        mock_fetch_url.assert_not_called()
+        assert reply.startswith("Okay, I won't fetch that.")
+        assert "denied-site.example.com" not in sa._fetch_approvals.get(window.id(), set())
+
+
+# ── fetch_url approval gate: the harness-side UI half of the injection fix ──
+
+class TestConfirmFetchUrl:
+    def _panel(self, window: FakeWindow) -> FakeView:
+        panel = window.new_file()
+        panel._content = "## 🤖 Assistant\n> _Thinking..._"
+        return panel
+
+    def _click_first_pending(self, allow: bool) -> None:
+        for _ in range(200):
+            if sa._pending_fetch_confirms:
+                break
+            time.sleep(0.005)
+        fetch_id = next(iter(sa._pending_fetch_confirms))
+        sa._resolve_fetch_confirm(fetch_id, allow)
+
+    def test_already_approved_domain_returns_true_without_blocking(self):
+        window = FakeWindow(window_id=4001)
+        panel = self._panel(window)
+        sa._fetch_approvals[window.id()] = {"example.com"}
+        try:
+            allowed = sa._confirm_fetch_url(window, panel, window.id(), "http://example.com/page")
+        finally:
+            sa._fetch_approvals.pop(window.id(), None)
+        assert allowed is True
+        assert sa._pending_fetch_confirms == {}
+
+    def test_clicking_allow_unblocks_with_true_and_remembers_domain(self):
+        window = FakeWindow(window_id=4002)
+        panel = self._panel(window)
+        t = threading.Thread(target=self._click_first_pending, args=(True,), daemon=True)
+        t.start()
+        try:
+            allowed = sa._confirm_fetch_url(window, panel, window.id(), "http://new-site.example.com/docs")
+        finally:
+            t.join(5)
+        assert allowed is True
+        assert "new-site.example.com" in sa._fetch_approvals.get(window.id(), set())
+        sa._fetch_approvals.pop(window.id(), None)
+
+    def test_clicking_deny_unblocks_with_false_and_does_not_remember(self):
+        window = FakeWindow(window_id=4003)
+        panel = self._panel(window)
+        t = threading.Thread(target=self._click_first_pending, args=(False,), daemon=True)
+        t.start()
+        try:
+            allowed = sa._confirm_fetch_url(window, panel, window.id(), "http://untrusted.example.com")
+        finally:
+            t.join(5)
+        assert allowed is False
+        assert "untrusted.example.com" not in sa._fetch_approvals.get(window.id(), set())
+
+    def test_no_response_times_out_to_deny(self):
+        window = FakeWindow(window_id=4004)
+        panel = self._panel(window)
+        with patch.object(sa, "_FETCH_CONFIRM_TIMEOUT", 0.05):
+            allowed = sa._confirm_fetch_url(window, panel, window.id(), "http://slow.example.com")
+        assert allowed is False
+        assert sa._pending_fetch_confirms == {}
+
+    def test_cancel_event_set_mid_wait_denies_promptly_without_full_timeout(self):
+        window = FakeWindow(window_id=4006)
+        panel = self._panel(window)
+        cancel = threading.Event()
+
+        def _cancel_after_prompt_shown():
+            for _ in range(200):
+                if sa._pending_fetch_confirms:
+                    break
+                time.sleep(0.005)
+            cancel.set()
+
+        t = threading.Thread(target=_cancel_after_prompt_shown, daemon=True)
+        start = time.time()
+        t.start()
+        with patch.object(sa, "_FETCH_CONFIRM_TIMEOUT", 30):
+            allowed = sa._confirm_fetch_url(
+                window, panel, window.id(), "http://slow-to-cancel.example.com", cancel_event=cancel
+            )
+        elapsed = time.time() - start
+        t.join(5)
+        assert allowed is False
+        assert elapsed < 5  # nowhere near the 30s timeout — cancellation short-circuited it
+        assert sa._pending_fetch_confirms == {}
+
+    def test_second_prompt_for_same_domain_does_not_reuse_a_stale_pending_entry(self):
+        """Sanity check that approvals are domain-scoped and independent prompts
+        don't leak state into each other."""
+        window = FakeWindow(window_id=4005)
+        panel = self._panel(window)
+        with patch.object(sa, "_FETCH_CONFIRM_TIMEOUT", 0.05):
+            first = sa._confirm_fetch_url(window, panel, window.id(), "http://a.example.com")
+            second = sa._confirm_fetch_url(window, panel, window.id(), "http://b.example.com")
+        assert first is False and second is False
+        assert sa._fetch_approvals.get(window.id(), set()) == set()
+
+
+class TestFetchConfirmHtmlAndNavigation:
+    def test_html_contains_allow_deny_links_and_escaped_url(self):
+        html = sa._make_fetch_confirm_html("fetch_1", "http://example.com?a=1&b=2")
+        assert 'href="fetch_allow:fetch_1"' in html
+        assert 'href="fetch_deny:fetch_1"' in html
+        assert "&amp;b=2" in html
+
+    def test_navigate_allow_resolves_pending_confirm(self):
+        event = threading.Event()
+        result = {"allow": False}
+        sa._pending_fetch_confirms["fetch_test_1"] = (event, result)
+        sa._on_fetch_confirm_navigate("fetch_allow:fetch_test_1", window=None)
+        assert result["allow"] is True
+        assert event.is_set()
+        assert "fetch_test_1" not in sa._pending_fetch_confirms
+
+    def test_navigate_deny_resolves_pending_confirm(self):
+        event = threading.Event()
+        result = {"allow": True}
+        sa._pending_fetch_confirms["fetch_test_2"] = (event, result)
+        sa._on_fetch_confirm_navigate("fetch_deny:fetch_test_2", window=None)
+        assert result["allow"] is False
+        assert event.is_set()
+
+    def test_navigate_unknown_fetch_id_does_not_raise(self):
+        sa._on_fetch_confirm_navigate("fetch_allow:does_not_exist", window=None)
+
+    def test_navigate_irrelevant_href_is_ignored(self):
+        sa._on_fetch_confirm_navigate("something:else", window=None)
+
+
+class TestCompactClearsFetchApprovals:
+    def test_slash_compact_clears_fetch_approvals_for_the_window(self):
+        input_box = FakeView(name=sa.input_view.NAME, content="/compact")
+        window = FakeWindow(views=[input_box], window_id=5001)
+        sa._fetch_approvals[window.id()] = {"example.com"}
+
+        cmd = sa.SublimeAssistantSubmitCommand(input_box)
+        cmd.run(None)
+
+        assert window.id() not in sa._fetch_approvals
