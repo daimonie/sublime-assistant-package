@@ -73,6 +73,29 @@ GET_FILE_SUMMARY_TOOL = {
     },
 }
 
+LOAD_SKILL_TOOL = {
+    "type": "function",
+    "function": {
+        "name": "load_skill",
+        "description": (
+            "Load the full instructions for a project-defined skill by name. The system "
+            "prompt's Available Skills section only lists each skill's name and "
+            "description; call this before following a skill whose description matches "
+            "the user's request."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "name": {
+                    "type": "string",
+                    "description": "The skill's name, exactly as listed in the Available Skills section",
+                }
+            },
+            "required": ["name"],
+        },
+    },
+}
+
 FETCH_URL_TOOL = {
     "type": "function",
     "function": {
@@ -310,12 +333,23 @@ def _dispatch_tool(
     on_read_file: Callable[[str], str | None] | None,
     on_list_files: Callable[[], str] | None,
     on_get_file_summary: Callable[[str], str] | None,
+    on_load_skill: Callable[[str], str] | None = None,
 ) -> str:
     """Execute one tool call and return the result string."""
     if name == "list_project_files" and on_list_files:
         if on_tool_call:
             on_tool_call(name, "")
         return on_list_files()
+    if name == "load_skill" and on_load_skill:
+        try:
+            skill_name = (json.loads(args).get("name") or "").strip()
+            if not skill_name:
+                return "Error: missing skill name"
+            if on_tool_call:
+                on_tool_call(name, skill_name)
+            return on_load_skill(skill_name)
+        except Exception as e:
+            return f"Error loading skill: {e}"
     if name == "get_file_summary" and on_get_file_summary:
         try:
             path = (json.loads(args).get("path") or "").strip()
@@ -428,6 +462,7 @@ def call(
     on_read_file: Callable[[str], str | None] | None = None,
     on_list_files: Callable[[], str] | None = None,
     on_get_file_summary: Callable[[str], str] | None = None,
+    on_load_skill: Callable[[str], str] | None = None,
     on_chunk: Callable[[str], None] | None = None,
     timeout_seconds: int | None = None,
     cancel_event: threading.Event | None = None,
@@ -470,7 +505,8 @@ def call(
                 name = fn.get("name") or ""
                 args = fn.get("arguments") or "{}"
                 result_text = _dispatch_tool(
-                    name, args, on_tool_call, on_read_file, on_list_files, on_get_file_summary
+                    name, args, on_tool_call, on_read_file, on_list_files, on_get_file_summary,
+                    on_load_skill,
                 )
                 tools_invoked.append((name, len(result_text)))
                 current_messages.append({"role": "tool", "tool_call_id": tc_id, "content": result_text})
@@ -509,7 +545,8 @@ def call(
             name = fn.get("name") or ""
             args = fn.get("arguments") or "{}"
             result_text = _dispatch_tool(
-                name, args, on_tool_call, on_read_file, on_list_files, on_get_file_summary
+                name, args, on_tool_call, on_read_file, on_list_files, on_get_file_summary,
+                on_load_skill,
             )
             tools_invoked.append((name, len(result_text)))
             current_messages.append({
@@ -696,6 +733,7 @@ class APIClient(abc.ABC):
         on_read_file: Callable[[str], str | None] | None = None,
         on_list_files: Callable[[], str] | None = None,
         on_get_file_summary: Callable[[str], str] | None = None,
+        on_load_skill: Callable[[str], str] | None = None,
         on_chunk: Callable[[str], None] | None = None,
         cancel_event: threading.Event | None = None,
     ) -> tuple[str, bool]:
@@ -723,6 +761,7 @@ class OpenAIClient(APIClient):
         on_read_file: Callable[[str], str | None] | None = None,
         on_list_files: Callable[[], str] | None = None,
         on_get_file_summary: Callable[[str], str] | None = None,
+        on_load_skill: Callable[[str], str] | None = None,
         on_chunk: Callable[[str], None] | None = None,
         cancel_event: threading.Event | None = None,
     ) -> tuple[str, bool]:
@@ -736,6 +775,7 @@ class OpenAIClient(APIClient):
             on_read_file=on_read_file,
             on_list_files=on_list_files,
             on_get_file_summary=on_get_file_summary,
+            on_load_skill=on_load_skill,
             on_chunk=on_chunk,
             timeout_seconds=self.timeout_seconds,
             cancel_event=cancel_event,
@@ -774,6 +814,7 @@ class ClaudeClient(APIClient):
         on_read_file: Callable[[str], str | None] | None = None,
         on_list_files: Callable[[], str] | None = None,
         on_get_file_summary: Callable[[str], str] | None = None,
+        on_load_skill: Callable[[str], str] | None = None,
         on_chunk: Callable[[str], None] | None = None,
         cancel_event: threading.Event | None = None,
     ) -> tuple[str, bool]:
@@ -824,7 +865,8 @@ class ClaudeClient(APIClient):
                     tool_use_id = block.get("id", "")
                     inp = block.get("input") or {}
                     result_text = _dispatch_tool(
-                        name, json.dumps(inp), on_tool_call, on_read_file, on_list_files, on_get_file_summary
+                        name, json.dumps(inp), on_tool_call, on_read_file, on_list_files, on_get_file_summary,
+                        on_load_skill,
                     )
                     tools_invoked.append((name, len(result_text)))
                     tool_results.append({
@@ -891,7 +933,8 @@ class ClaudeClient(APIClient):
                 tool_use_id = block.get("id", "")
                 inp = block.get("input") or {}
                 result_text = _dispatch_tool(
-                    name, json.dumps(inp), on_tool_call, on_read_file, on_list_files, on_get_file_summary
+                    name, json.dumps(inp), on_tool_call, on_read_file, on_list_files, on_get_file_summary,
+                    on_load_skill,
                 )
                 tools_invoked.append((name, len(result_text)))
                 tool_results.append({

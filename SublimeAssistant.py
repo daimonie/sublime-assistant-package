@@ -14,7 +14,7 @@ import sublime
 import sublime_plugin
 
 from .assistant import api, code_extractor, context, file_finder, git, history, input_view, loop_runner, summarizer
-from .assistant import project_rules, slash_commands
+from .assistant import project_rules, skills, slash_commands
 from .assistant import diff_view as diff_mgr
 from .assistant import view as chat_view
 
@@ -329,10 +329,16 @@ def _call_api_core(
 
     win_id = window.id()
 
-    # Prepend project rules (AGENTS.md / SKILLS.md) to system prompt once per window session
+    # Prepend project rules (AGENTS.md) to system prompt once per window session
     rules = project_rules.load(git_root, win_id) if git_root else ""
     if rules:
         system_prompt = rules + "\n\n---\n\n" + system_prompt
+
+    # Prepend the Agent Skills index (name + description only; full bodies load on
+    # demand via the load_skill tool) once per window session
+    skills_index = skills.build_index(git_root, win_id) if git_root else ""
+    if skills_index:
+        system_prompt = skills_index + "\n\n---\n\n" + system_prompt
 
     messages = history.get_messages(win_id, system_prompt) + [{"role": "user", "content": full_content}]
     request_timeout = max(1, int(settings.get("request_timeout") or 120))
@@ -381,6 +387,12 @@ def _call_api_core(
         fetched_files.add(path)
         return content
 
+    loaded_skills: list[str] = []
+
+    def on_load_skill(name: str) -> str:
+        loaded_skills.append(name)
+        return skills.load_body(git_root, name) if git_root else f"Unknown skill: {name}"
+
     def on_tool_call(tool_name: str, url_or_args: str) -> None:
         if tool_name == "fetch_url":
             url_requests.append(url_or_args)
@@ -392,6 +404,8 @@ def _call_api_core(
             status = "> _Listing project files..._"
         elif tool_name == "get_file_summary":
             status = f"> _Reading {url_or_args}..._"
+        elif tool_name == "load_skill":
+            status = f"> _Loading skill {url_or_args}..._"
         else:
             return
         sublime.set_timeout(
@@ -400,7 +414,7 @@ def _call_api_core(
         )
 
     tools = [api.FETCH_URL_TOOL, api.READ_FILE_TOOL,
-             api.LIST_PROJECT_FILES_TOOL, api.GET_FILE_SUMMARY_TOOL]
+             api.LIST_PROJECT_FILES_TOOL, api.GET_FILE_SUMMARY_TOOL, api.LOAD_SKILL_TOOL]
 
     def on_chunk(text: str) -> None:
         sublime.set_timeout(
@@ -415,6 +429,7 @@ def _call_api_core(
         on_read_file=on_read_file,
         on_list_files=on_list_files,
         on_get_file_summary=on_get_file_summary,
+        on_load_skill=on_load_skill,
         on_chunk=on_chunk,
         cancel_event=cancel_event,
     )
@@ -426,6 +441,8 @@ def _call_api_core(
         tool_log_parts.append("summarized " + ", ".join(f"`{f}`" for f in sorted(fetched_files)))
     if url_requests:
         tool_log_parts.append("fetched " + ", ".join(f"`{u}`" for u in url_requests))
+    if loaded_skills:
+        tool_log_parts.append("loaded skill " + ", ".join(f"`{s}`" for s in loaded_skills))
     if tool_log_parts:
         reply = reply + "\n\n> **Tool calls:** " + " · ".join(tool_log_parts)
 

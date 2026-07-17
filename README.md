@@ -31,7 +31,8 @@ No subscription. No Electron shell. No sending your whole file just to change on
 - **Interrupt anytime** — while a response or `/loop` run is streaming, click **⏹ Stop generating** (or press `Ctrl+C` with the input focused) to cancel.
 - **Slash commands** — preset prompts (`/explain`, `/fix`, `/tests`, `/review`, `/debug`, `/docs`, `/diff`) and plugin actions (`/init`, `/compact`) triggered by typing a command alone. See [Slash Commands](#slash-commands).
 - **Suggested shell commands, never run for you** — when the model recommends a test/lint/build command, it's shown in a fenced block for you to copy and run — the plugin never executes it.
-- **Project rules** — an `AGENTS.md` and/or `SKILLS.md` at the git root are automatically prepended to the system prompt once per window session, so you can set project-specific conventions, constraints, or personas.
+- **Project rules** — an `AGENTS.md` at the git root is automatically prepended to the system prompt once per window session, so you can set project-specific conventions, constraints, or personas.
+- **Agent Skills** — drop a `skills/<name>/SKILL.md` at the git root to teach the model a triggered, on-demand procedure (steps to follow, tools to call) instead of one more always-on instruction. See [Project rules and Agent Skills](#project-rules-agentsmd-and-agent-skills-skills).
 - **Directory summary, built lazily** — `/init` crawls the git root and builds LLM-generated per-file descriptions, cached to disk. The model pulls context on demand via tools instead of the whole summary being injected into every message.
 - **Asynchronous by design** — API calls run on a background thread; the editor never freezes waiting on a response.
 
@@ -49,6 +50,7 @@ SublimeAssistant's chat isn't limited to one prompt in, one reply out. It has a 
 | `fetch_url` | Fetches and reads a web page |
 | `list_project_files` | Lists files under the git root |
 | `get_file_summary` | Pulls a cached per-file summary (built by `/init`) |
+| `load_skill` | Loads the full instructions for a project-defined skill (see [Agent Skills](#project-rules-agentsmd-and-agent-skills-skills)) |
 
 Tool calls are shown in the chat footer as they happen, so you can see what the model is doing, not just what it concludes.
 
@@ -173,14 +175,25 @@ Slash commands are preset prompts or plugin actions triggered by typing a comman
 
 ---
 
-## Project rules (AGENTS.md / SKILLS.md)
+## Project rules (AGENTS.md) and Agent Skills (skills/)
 
-Place one or both files at the **git root** of your project:
+These are two different mechanisms for teaching the model about your project, and they
+belong in different places:
 
-- **`AGENTS.md`** — Project-level instructions: coding conventions, architecture notes, personas, things the model must always do or avoid.
-- **`SKILLS.md`** — Optional secondary rules (e.g. team-specific tooling notes).
+- **`AGENTS.md`** (git root) — always-on instructions: coding conventions, architecture
+  notes, personas, things the model must always do or avoid. Read once per window
+  session and prepended in full to the system prompt, so keep it short — it costs
+  context on every single turn.
+- **`skills/<name>/SKILL.md`** (git root) — a *triggered* procedure, not an always-on
+  rule. Each skill lives in its own subdirectory as a `SKILL.md` file with a small
+  frontmatter block plus a body of steps. Only each skill's `name` and `description`
+  are read up front and listed in the system prompt (one line each); the full body is
+  loaded only when the model decides a skill's description matches the current request,
+  via the `load_skill` tool. This keeps the system prompt cheap even with many skills,
+  and means a skill's steps only ever show up when they're actually relevant.
 
-Both files are read once per window session and prepended to the system prompt. They are never sent again after the first message, so they don't inflate subsequent requests.
+Both are read once per window session — edit either and run `/compact` to pick up the
+change mid-session.
 
 Example `AGENTS.md`:
 
@@ -188,6 +201,22 @@ Example `AGENTS.md`:
 This project uses Python 3.11 and follows PEP 8 strictly.
 All public functions must have type hints and a one-line docstring.
 Never suggest external dependencies unless explicitly asked.
+```
+
+Example `skills/verify/SKILL.md` (this repo ships one, used to check other docs like
+this README against the actual code):
+
+```markdown
+---
+name: verify
+description: Use when the user asks whether a file is up to date, accurate, or
+  reflects the current state of the project.
+---
+
+1. Call `list_project_files` to see what exists.
+2. Call `get_file_summary` on the files relevant to the claim being checked.
+3. Compare the target file's claims against what those files actually contain.
+4. Report "Up to date" vs "Needs updating", with concrete fixes.
 ```
 
 ---
@@ -206,7 +235,7 @@ Edit `SublimeAssistant.sublime-settings` (or create a User override in `Packages
   - `backend` — `"openai"` (default, covers Ollama/Mistral/LM Studio) or `"claude"` (Anthropic). Required for Claude API usage.
 - **`request_timeout`** — Timeout in seconds for an AI request (default 120). Increase when using fetch_url or with slow token generation.
 - **`loop_max_iterations`** — Maximum number of turns a `/loop` or `/research` run will take before stopping on its own (default 8). Raise it for deeper research/investigation runs; lower it to cap cost/time.
-- **`system_prompt`** — Instructions prepended to every conversation. Project rules from `AGENTS.md` / `SKILLS.md` are prepended on top of this.
+- **`system_prompt`** — Instructions prepended to every conversation. `AGENTS.md` and the Agent Skills index are prepended on top of this — see [Project rules and Agent Skills](#project-rules-agentsmd-and-agent-skills-skills).
 
 Top-level `api_url` / `api_key` / `model` are used as fallbacks when no preset is active or when a preset omits a key.
 
@@ -327,7 +356,8 @@ SublimeAssistant/
 │   ├── history.py             # Per-window conversation history
 │   ├── input_view.py          # Input area view (bottom-right strip)
 │   ├── loop_runner.py         # /goal + /loop iteration prompts and status-marker parsing
-│   ├── project_rules.py       # Load AGENTS.md / SKILLS.md from git root
+│   ├── project_rules.py       # Load AGENTS.md from git root
+│   ├── skills.py              # Discover skills/<name>/SKILL.md; build the index; load bodies on demand
 │   ├── slash_commands.py      # Slash command parsing and template expansion
 │   ├── summarizer.py          # Crawl git root and produce a code-structure summary
 │   └── view.py                # Chat panel UI helpers
@@ -336,7 +366,7 @@ SublimeAssistant/
 
 ## Testing
 
-The `sublime` module only exists inside Sublime Text's embedded Python, so the test suite stubs it (`tests/conftest.py`) to unit-test the plugin's pure logic — snippet merging, code block extraction, slash commands, history, project rules — outside the editor. `assistant/diff_view.py` (the merge/localization engine behind Accept and the phantom preview) has the deepest coverage, including a regression test built from a real bug report so that class of failure can't silently come back.
+The `sublime` module only exists inside Sublime Text's embedded Python, so the test suite stubs it (`tests/conftest.py`) to unit-test the plugin's pure logic — snippet merging, code block extraction, slash commands, history, project rules, Agent Skills — outside the editor. `assistant/diff_view.py` (the merge/localization engine behind Accept and the phantom preview) has the deepest coverage, including a regression test built from a real bug report so that class of failure can't silently come back.
 
 ```bash
 pip install pytest

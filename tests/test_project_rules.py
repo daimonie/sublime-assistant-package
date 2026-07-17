@@ -1,4 +1,4 @@
-"""Unit tests for assistant.project_rules — AGENTS.md / SKILLS.md loading."""
+"""Unit tests for assistant.project_rules — AGENTS.md loading."""
 from __future__ import annotations
 
 import itertools
@@ -12,22 +12,23 @@ def _win_id() -> int:
     return next(_ids)
 
 
-def test_loads_and_combines_both_files(tmp_path):
+def test_loads_agents_md(tmp_path):
     (tmp_path / "AGENTS.md").write_text("Follow PEP 8 strictly.")
-    (tmp_path / "SKILLS.md").write_text("Use the internal http client.")
-    combined = project_rules.load(str(tmp_path), _win_id())
-    assert "Follow PEP 8 strictly." in combined
-    assert "Use the internal http client." in combined
+    assert project_rules.load(str(tmp_path), _win_id()) == "Follow PEP 8 strictly."
 
 
-def test_missing_files_returns_empty_string(tmp_path):
+def test_missing_file_returns_empty_string(tmp_path):
     assert project_rules.load(str(tmp_path), _win_id()) == ""
 
 
-def test_only_agents_md_present(tmp_path):
+def test_skills_md_is_ignored(tmp_path):
+    """SKILLS.md used to be combined in here; it's now handled by assistant.skills
+    instead, so project_rules must not read it any more."""
     (tmp_path / "AGENTS.md").write_text("Rule A")
+    (tmp_path / "SKILLS.md").write_text("Use the internal http client.")
     combined = project_rules.load(str(tmp_path), _win_id())
     assert combined == "Rule A"
+    assert "http client" not in combined
 
 
 def test_result_is_cached_per_window(tmp_path):

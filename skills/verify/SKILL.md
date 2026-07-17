@@ -1,18 +1,7 @@
-# SublimeAssistant Skills
-
-Skills are triggered automatically when the user's query matches the described intent.
-Always check whether a skill applies before answering a question.
-
 ---
-
-## Skill: verify
-
-**Triggers when** the user asks whether a file is up to date, accurate, current, or reflects
-the present state of the project. Examples:
-- "Is README.md up to date?"
-- "Does this file reflect the current code?"
-- "Check if X is accurate"
-- "Make sure Y is current"
+name: verify
+description: Use when the user asks whether a file is up to date, accurate, current, or reflects the present state of the project — e.g. "Is README.md up to date?", "Does this file reflect the current code?", "Check if X is accurate", "Make sure Y is current".
+---
 
 **Steps (always follow in order):**
 

@@ -1,29 +1,30 @@
-"""Load project-level prompt rules from AGENTS.md and SKILLS.md."""
+"""Load project-level prompt rules from AGENTS.md.
+
+Per-skill instructions used to live here too (a flat SKILLS.md), but that's now
+handled by assistant.skills, which loads skills/<name>/SKILL.md files on demand
+instead of always injecting their full text.
+"""
 from __future__ import annotations
 
 import os
 
-# win_id -> combined rules text (empty string means "checked and found nothing")
+# win_id -> rules text (empty string means "checked and found nothing")
 _cache: dict[int, str] = {}
 
 
 def load(git_root: str, win_id: int) -> str:
-    """Return combined contents of AGENTS.md and SKILLS.md from git_root.
+    """Return the contents of AGENTS.md from git_root, or "" if it doesn't exist.
 
-    Results are cached per window so the files are only read once per session.
+    Results are cached per window so the file is only read once per session.
     """
     if win_id in _cache:
         return _cache[win_id]
-    parts: list[str] = []
-    for name in ("AGENTS.md", "SKILLS.md"):
-        path = os.path.join(git_root, name)
-        if os.path.isfile(path):
-            try:
-                text = open(path, encoding="utf-8").read().strip()
-                if text:
-                    parts.append(text)
-            except Exception:
-                pass
-    combined = "\n\n".join(parts)
-    _cache[win_id] = combined
-    return combined
+    path = os.path.join(git_root, "AGENTS.md")
+    text = ""
+    if os.path.isfile(path):
+        try:
+            text = open(path, encoding="utf-8").read().strip()
+        except Exception:
+            pass
+    _cache[win_id] = text
+    return text
