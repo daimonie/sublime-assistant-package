@@ -29,5 +29,9 @@
     {
         "caption": "Sublime Assistant: Summarize Directory",
         "command": "sublime_assistant_summarize_directory"
+    },
+    {
+        "caption": "Sublime Assistant: Interrupt",
+        "command": "sublime_assistant_interrupt"
     }
 ]

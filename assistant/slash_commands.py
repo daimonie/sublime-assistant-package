@@ -8,15 +8,13 @@ TEMPLATES: dict[str, str] = {
     "/review":   "Review the following code for correctness, style, performance, and maintainability:\n\n",
     "/debug":    "Debug the following issue. Identify the root cause and propose a fix:\n\n",
     "/docs":     "Write clear documentation (docstrings and comments) for the following code:\n\n",
-    "/research": (
-        "Research the following topic thoroughly. Use the fetch_url tool to consult relevant "
-        "documentation and authoritative sources, then provide a comprehensive summary with citations:\n\n"
-    ),
     "/diff": "Explain and review the following git diff:\n\n",
 }
 
 # These commands trigger plugin behaviour; no template expansion.
-SPECIAL: frozenset[str] = frozenset({"/init", "/compact", "/clear"})
+# /goal and /loop drive the iterative goal-pursuit loop (assistant/loop_runner.py);
+# /research is a preset over that same loop rather than a single-shot template.
+SPECIAL: frozenset[str] = frozenset({"/init", "/compact", "/clear", "/goal", "/loop", "/research"})
 
 
 def parse(query: str) -> tuple[str, str, str]:
@@ -28,7 +26,7 @@ def parse(query: str) -> tuple[str, str, str]:
     """
     stripped = query.strip()
     for cmd in SPECIAL:
-        if stripped == cmd:
+        if stripped == cmd or stripped.startswith(cmd + " "):
             return query, query, cmd
     for cmd, template in TEMPLATES.items():
         if stripped == cmd or stripped.startswith(cmd + " "):

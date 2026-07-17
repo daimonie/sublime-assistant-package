@@ -13,7 +13,7 @@ import time
 import sublime
 import sublime_plugin
 
-from .assistant import api, code_extractor, context, file_finder, git, history, input_view, summarizer
+from .assistant import api, code_extractor, context, file_finder, git, history, input_view, loop_runner, summarizer
 from .assistant import project_rules, slash_commands
 from .assistant import diff_view as diff_mgr
 from .assistant import view as chat_view
@@ -32,11 +32,29 @@ _hint_sets: dict[int, sublime.PhantomSet] = {}
 # block_id -> PhantomSet for inline editor suggestion phantom
 _inline_phantom_sets: dict[str, sublime.PhantomSet] = {}
 
+# window_id -> cancel event for the in-flight request (single call or /loop)
+_active_requests: dict[int, threading.Event] = {}
+
+# window_id -> current goal text, set by /goal and consumed/refreshed by /loop
+_goal_state: dict[int, str] = {}
+
 _HINT_HTML = (
     '<body id="sa-hint"><style>'
     'body { margin: 0; padding: 2px 0;'
     ' color: color(var(--foreground) alpha(0.35)); font-style: italic; }'
     '</style>Ask anything… <i>Ctrl+Enter</i> to send</body>'
+)
+
+# Shown in the (empty) input area in place of _HINT_HTML while a request is in flight.
+# Anchored to the input pane rather than the chat panel so it doesn't scroll out of view
+# as new content streams in.
+_STOP_HINT_HTML = (
+    '<body id="sa-hint"><style>'
+    'body { margin: 0; padding: 2px 0; }'
+    'a { color: #f85149; font-weight: bold; text-decoration: none; }'
+    '.hint { color: color(var(--foreground) alpha(0.35)); font-style: italic; }'
+    '</style><a href="interrupt:">&#9209; Stop generating</a> '
+    '<span class="hint"><i>Ctrl+C</i> also works</span></body>'
 )
 
 _DEFAULT_SUMMARY_INTERVAL = 1800  # seconds (30 minutes)
@@ -240,31 +258,71 @@ def _make_client(url: str, api_key: str, model: str, timeout: int, backend: str)
     return api.OpenAIClient(url, api_key, model, timeout_seconds=timeout)
 
 
-def _call_api(
+def _find_input_view(window: sublime.Window) -> sublime.View | None:
+    for view in window.views():
+        if view.name() == input_view.NAME:
+            return view
+    return None
+
+
+def _start_streaming(window: sublime.Window) -> threading.Event:
+    """Register a new in-flight request for `window`, mark the input view as streaming
+    (drives the Ctrl+C-in-input-view interrupt keybinding), and swap its idle hint for a
+    clickable Stop control. The input pane is used rather than the chat panel because it
+    stays put — a phantom anchored in the chat panel scrolls out of view as the reply
+    streams in and the panel auto-scrolls to keep up."""
+    event = threading.Event()
+    _active_requests[window.id()] = event
+    inp = _find_input_view(window)
+    if inp:
+        inp.settings().set("sa_streaming", True)
+        inp.run_command("sublime_assistant_update_input_hint", {"show": True})
+    return event
+
+
+def _finish_streaming(window: sublime.Window) -> None:
+    """Tear down the in-flight-request bookkeeping for `window`, restoring the input view's
+    idle hint. Always run this once the request (or the whole /loop run) has finished,
+    cancelled or not."""
+    _active_requests.pop(window.id(), None)
+    inp = _find_input_view(window)
+    if inp:
+        inp.settings().erase("sa_streaming")
+        inp.run_command("sublime_assistant_update_input_hint", {"show": True})
+
+
+def _append_and_wait(panel: sublime.View, text: str) -> None:
+    """Append `text` to the chat panel and block until it has actually run.
+
+    Called from background threads. panel.run_command must be marshaled onto the main
+    thread via sublime.set_timeout; the streaming on_chunk callback used by _call_api_core
+    needs the placeholder text to already be in the buffer before the request starts, so
+    this can't be fire-and-forget the way most other UI updates in this file are.
+    """
+    done = threading.Event()
+
+    def _do() -> None:
+        panel.run_command("sublime_assistant_append", {"text": text})
+        done.set()
+
+    sublime.set_timeout(_do, 0)
+    done.wait(5)
+
+
+def _call_api_core(
     window: sublime.Window,
     panel: sublime.View,
     full_content: str,
-    selection_region: list[int] | None,
-    git_root: str = "",
-) -> None:
+    git_root: str,
+    cancel_event: threading.Event | None,
+) -> tuple[str, bool]:
     """
-    Call the API with the constructed messages and handle the response.
+    Send one turn to the API (with tool-call support and streaming) and append it to history.
 
-    This function retrieves the API settings, constructs the message history including
-    the current user query, sends it to the API, and processes the response by:
-    - Updating the message history
-    - Replacing the placeholder in the chat panel with the API response
-    - Adding apply phantoms for any fenced code blocks in the response
-
-    Args:
-        window: The Sublime Text window containing the chat panel.
-        panel: The chat panel view where responses will be displayed.
-        full_content: The complete content to send to the API (query + context).
-        selection_region: Optional line range [start, end] of the current selection,
-                         used for precise code block application.
-
-    Returns:
-        None: All operations are performed asynchronously via callbacks.
+    This holds all the request/tool-call plumbing that used to live directly in _call_api.
+    It's shared by the normal single-turn flow (_call_api) and the /loop iteration driver
+    (_run_loop), so that plumbing is defined exactly once. Returns (reply_text, success);
+    the caller decides how/where to post the reply in the UI.
     """
     settings = sublime.load_settings("SublimeAssistant.sublime-settings")
     url, api_key, model, system_prompt, backend = _get_api_config(settings)
@@ -358,6 +416,7 @@ def _call_api(
         on_list_files=on_list_files,
         on_get_file_summary=on_get_file_summary,
         on_chunk=on_chunk,
+        cancel_event=cancel_event,
     )
 
     tool_log_parts: list[str] = []
@@ -373,6 +432,29 @@ def _call_api(
     if success:
         history.append(win_id, "user", full_content)
         history.append(win_id, "assistant", reply)
+
+    return reply, success
+
+
+def _call_api(
+    window: sublime.Window,
+    panel: sublime.View,
+    full_content: str,
+    selection_region: list[int] | None,
+    git_root: str = "",
+) -> None:
+    """
+    Send `full_content` as one turn and post the reply into the chat panel.
+
+    Wraps _call_api_core with the UI finalization step (replacing the placeholder,
+    adding Apply phantoms) for the normal single-turn chat flow. All operations are
+    performed asynchronously via callbacks.
+    """
+    cancel_event = _active_requests.get(window.id())
+    reply, success = _call_api_core(window, panel, full_content, git_root, cancel_event)
+
+    if cancel_event is not None and cancel_event.is_set():
+        reply = reply + "\n\n_⏹ Stopped by user._"
 
     sublime.set_timeout(
         lambda: panel.run_command("sublime_assistant_replace_placeholder", {
@@ -429,11 +511,100 @@ def _submit_query(
     panel.run_command("sublime_assistant_append", {
         "text": chat_view.user_block(query, result.hints) + chat_view.assistant_header(preset, model)
     })
-    threading.Thread(
-        target=_call_api,
-        args=(window, panel, result.content, selection_region, git_root),
-        daemon=True,
-    ).start()
+    _start_streaming(window)
+
+    def _run() -> None:
+        try:
+            _call_api(window, panel, result.content, selection_region, git_root)
+        finally:
+            sublime.set_timeout(lambda: _finish_streaming(window), 0)
+
+    threading.Thread(target=_run, daemon=True).start()
+
+
+def _launch_loop(window: sublime.Window, panel: sublime.View, query: str, goal_text: str, git_root: str) -> None:
+    """Echo the invoking slash command to chat, then run _run_loop on a background thread.
+    Shared by the /loop and /research command handlers."""
+    settings = sublime.load_settings("SublimeAssistant.sublime-settings")
+    max_iterations = max(1, int(settings.get("loop_max_iterations") or loop_runner.DEFAULT_MAX_ITERATIONS))
+
+    panel.run_command("sublime_assistant_append", {"text": f"\n---\n\n## 👤 User\n{query}\n"})
+    cancel_event = _start_streaming(window)
+
+    def _run() -> None:
+        try:
+            _run_loop(window, panel, goal_text, git_root, cancel_event, max_iterations)
+        finally:
+            sublime.set_timeout(lambda: _finish_streaming(window), 0)
+
+    threading.Thread(target=_run, daemon=True).start()
+
+
+def _run_loop(
+    window: sublime.Window,
+    panel: sublime.View,
+    goal_text: str,
+    git_root: str,
+    cancel_event: threading.Event,
+    max_iterations: int,
+) -> None:
+    """Iteratively pursue `goal_text`, one assistant turn per iteration, until the model
+    reports it's done (a `LOOP_STATUS: complete` marker), the iteration cap is hit, the
+    model stops reporting a status at all, or cancel_event is set. Backs /loop and /research.
+
+    Each iteration reuses _call_api_core exactly like a normal chat turn — the model can
+    only propose code changes via fenced code blocks that still require a manual Apply
+    click; this loop never writes files on its own.
+    """
+    _append_and_wait(
+        panel,
+        f"\n---\n\n## 🎯 Goal\n{goal_text}\n\n_Running loop (max {max_iterations} iterations)…_\n",
+    )
+
+    for i in range(1, max_iterations + 1):
+        if cancel_event.is_set():
+            _append_and_wait(panel, f"\n_Loop interrupted before iteration {i}._\n")
+            return
+
+        _append_and_wait(
+            panel,
+            f"\n\n## 🤖 Assistant — iteration {i}/{max_iterations}\n{chat_view.PLACEHOLDER}",
+        )
+
+        prompt = loop_runner.build_iteration_prompt(goal_text, i, max_iterations)
+        reply, success = _call_api_core(window, panel, prompt, git_root, cancel_event)
+
+        was_cancelled = cancel_event.is_set()
+        if was_cancelled:
+            reply = reply + "\n\n_⏹ Stopped by user._"
+
+        sublime.set_timeout(
+            lambda r=reply: panel.run_command("sublime_assistant_replace_placeholder", {
+                "text": r + "\n",
+                "selection_region": None,
+            }),
+            0,
+        )
+
+        if was_cancelled:
+            _append_and_wait(panel, f"\n_Loop interrupted after iteration {i}._\n")
+            return
+        if not success:
+            _append_and_wait(panel, "\n_Loop stopped — request failed._\n")
+            return
+        if loop_runner.is_goal_complete(reply):
+            plural = "" if i == 1 else "s"
+            _append_and_wait(panel, f"\n**Loop finished** — goal achieved after {i} iteration{plural}.\n")
+            return
+        if not loop_runner.has_status_marker(reply):
+            _append_and_wait(
+                panel,
+                "\n_Loop stopped — the model didn't report a loop status; treating this as "
+                "finished. Run `/loop` again to keep going._\n",
+            )
+            return
+
+    _append_and_wait(panel, f"\n_Loop stopped — reached the max iterations ({max_iterations})._\n")
 
 
 def _dismiss_inline(block_id: str) -> None:
@@ -723,6 +894,18 @@ class SublimeAssistantAskCommand(sublime_plugin.TextCommand):
             window.focus_view(inp)
 
 
+class SublimeAssistantInterruptCommand(sublime_plugin.WindowCommand):
+    """Cancel the in-flight request (a single call or an entire /loop run) for this window."""
+
+    def run(self) -> None:
+        event = _active_requests.get(self.window.id())
+        if event is None:
+            sublime.status_message("SublimeAssistant: nothing to interrupt")
+            return
+        event.set()
+        sublime.status_message("SublimeAssistant: interrupting…")
+
+
 class SublimeAssistantUsePresetCommand(sublime_plugin.WindowCommand):
     """Switch the active API preset (e.g. local vs mistral)."""
 
@@ -799,11 +982,15 @@ class SublimeAssistantSubmitCommand(sublime_plugin.TextCommand):
         query = self.view.substr(sublime.Region(0, self.view.size())).strip()
         if not window or not query:
             return
+        if window.id() in _active_requests:
+            sublime.status_message("SublimeAssistant: a request is already in progress — interrupt it first.")
+            return
 
         self.view.replace(edit, sublime.Region(0, self.view.size()), "")
         self.view.run_command("sublime_assistant_update_input_hint", {"show": True})
 
         display_q, api_q, cmd = slash_commands.parse(query)
+        win_id = window.id()
 
         # Special commands — act immediately, no API call
         if cmd == "/init":
@@ -815,12 +1002,62 @@ class SublimeAssistantSubmitCommand(sublime_plugin.TextCommand):
             return
 
         if cmd in ("/compact", "/clear"):
-            win_id = window.id()
             history.clear(win_id)
+            _goal_state.pop(win_id, None)
             panel = chat_view.get_or_create(window)
             if panel:
                 panel.run_command("sublime_assistant_append",
                                   {"text": "\n---\n_Conversation history cleared._\n"})
+            return
+
+        if cmd == "/goal":
+            goal_arg = query[len("/goal"):].strip()
+            panel = chat_view.get_or_create(window)
+            if panel:
+                if goal_arg:
+                    _goal_state[win_id] = goal_arg
+                    panel.run_command("sublime_assistant_append", {
+                        "text": f"\n---\n\n## 👤 User\n{query}\n\n_Goal set._\n"
+                    })
+                else:
+                    shown = _goal_state.get(win_id) or "(no goal set)"
+                    panel.run_command("sublime_assistant_append", {
+                        "text": f"\n---\n\n## 👤 User\n{query}\n\n_Current goal: {shown}_\n"
+                    })
+            return
+
+        if cmd == "/loop":
+            arg = query[len("/loop"):].strip()
+            goal_text = arg or _goal_state.get(win_id, "")
+            panel = chat_view.get_or_create(window)
+            if not panel:
+                return
+            if not goal_text:
+                panel.run_command("sublime_assistant_append", {
+                    "text": (f"\n---\n\n## 👤 User\n{query}\n\n_No goal set — use "
+                             "`/goal <description>` or `/loop <description>`._\n")
+                })
+                return
+            _goal_state[win_id] = goal_text
+            target_dir = _get_active_dir(window) or ""
+            g_root = _find_git_root(target_dir) if target_dir else ""
+            _launch_loop(window, panel, query, goal_text, g_root)
+            return
+
+        if cmd == "/research":
+            topic = query[len("/research"):].strip()
+            panel = chat_view.get_or_create(window)
+            if not panel:
+                return
+            if not topic:
+                panel.run_command("sublime_assistant_append", {
+                    "text": f"\n---\n\n## 👤 User\n{query}\n\n_Usage: `/research <topic>`._\n"
+                })
+                return
+            goal_text = loop_runner.build_research_goal(topic)
+            target_dir = _get_active_dir(window) or ""
+            g_root = _find_git_root(target_dir) if target_dir else ""
+            _launch_loop(window, panel, query, goal_text, g_root)
             return
 
         # Resolve git root for git-based commands
@@ -1059,11 +1296,26 @@ class SublimeAssistantSummarizeDirectoryCommand(sublime_plugin.WindowCommand):
 
 
 class SublimeAssistantUpdateInputHintCommand(sublime_plugin.TextCommand):
-    """Show or hide the placeholder hint in the input area."""
+    """Show or hide the placeholder hint in the input area.
+
+    While a request is streaming (the input view's "sa_streaming" setting), the idle
+    "Ask anything…" hint is replaced with a clickable Stop control instead — the input
+    pane doesn't scroll, so this is where an interrupt affordance stays reachable for the
+    whole duration of a response or a multi-iteration /loop run.
+    """
 
     def run(self, edit, show: bool = True):
         ps = _hint_sets.setdefault(self.view.id(), sublime.PhantomSet(self.view, "sa_hint"))
-        if show and self.view.size() == 0:
+        if self.view.size() != 0:
+            ps.update([])
+            return
+        if self.view.settings().get("sa_streaming"):
+            window = self.view.window()
+            ps.update([sublime.Phantom(
+                sublime.Region(0, 0), _STOP_HINT_HTML, sublime.LAYOUT_INLINE,
+                on_navigate=lambda href, w=window: w.run_command("sublime_assistant_interrupt") if w else None,
+            )])
+        elif show:
             ps.update([sublime.Phantom(
                 sublime.Region(0, 0), _HINT_HTML, sublime.LAYOUT_INLINE
             )])

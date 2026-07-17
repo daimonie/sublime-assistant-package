@@ -5,6 +5,7 @@ import abc
 import json
 import re
 import socket
+import threading
 import traceback
 import urllib.error
 import urllib.parse
@@ -351,11 +352,14 @@ def _do_request_streaming(
     tools: list[dict] | None,
     on_chunk: Callable[[str], None],
     timeout_seconds: int = _TIMEOUT,
+    cancel_event: threading.Event | None = None,
 ) -> tuple[str, list[dict], str, bool]:
     """Stream a request via SSE. Returns (text, tool_calls, error_msg, success).
 
     Calls on_chunk(accumulated_text) after each content token.
     tool_calls is non-empty when the model wants to invoke tools.
+    If cancel_event is set mid-stream, returns early with whatever text has
+    accumulated so far, treated as a normal (early) completion.
     """
     body: dict = {"model": model, "messages": messages, "stream": True}
     if tools:
@@ -371,6 +375,8 @@ def _do_request_streaming(
     try:
         with urllib.request.urlopen(req, timeout=timeout_seconds) as resp:
             for raw in resp:
+                if cancel_event is not None and cancel_event.is_set():
+                    break
                 line = raw.decode("utf-8", errors="replace").rstrip("\r\n")
                 if not line.startswith("data: "):
                     continue
@@ -424,10 +430,13 @@ def call(
     on_get_file_summary: Callable[[str], str] | None = None,
     on_chunk: Callable[[str], None] | None = None,
     timeout_seconds: int | None = None,
+    cancel_event: threading.Event | None = None,
 ) -> tuple[str, bool]:
     """Send messages to the API; if the model returns tool_calls, run them and continue. Returns (reply_text, success).
     If on_tool_call is set, it is called as on_tool_call(tool_name, url_or_args) before running fetch_url (so the UI can show 'Fetching ...').
-    timeout_seconds: if set, overrides the default request timeout (useful for slow local models or long context)."""
+    timeout_seconds: if set, overrides the default request timeout (useful for slow local models or long context).
+    cancel_event: if set, checked before each request/tool round and mid-stream; an early stop is treated as a
+    normal completion with whatever text has been produced so far."""
     headers = {"Content-Type": "application/json"}
     if api_key:
         headers["Authorization"] = f"Bearer {api_key}"
@@ -438,12 +447,15 @@ def call(
     tools_invoked: list[tuple[str, int]] = []  # (tool_name, result_size_chars)
 
     while rounds < _MAX_TOOL_ROUNDS:
+        if cancel_event is not None and cancel_event.is_set():
+            return "", True
         rounds += 1
         request_info = _format_request_info(url, model, current_messages)
 
         if on_chunk:
             text, tool_calls_stream, err_msg, ok = _do_request_streaming(
-                url, headers, model, current_messages, tools, on_chunk, timeout_seconds=timeout
+                url, headers, model, current_messages, tools, on_chunk, timeout_seconds=timeout,
+                cancel_event=cancel_event,
             )
             if not ok:
                 summary = _format_tool_summary(tools_invoked)
@@ -520,11 +532,14 @@ def _do_claude_request_streaming(
     body: dict,
     on_chunk: Callable[[str], None],
     timeout_seconds: int = _TIMEOUT,
+    cancel_event: threading.Event | None = None,
 ) -> tuple[str, list[dict], str, bool]:
     """Stream a Claude Messages API request via SSE.
 
     Returns (text, tool_use_blocks, error_msg, success).
     tool_use_blocks are Anthropic-format dicts (type='tool_use', id, name, input).
+    If cancel_event is set mid-stream, returns early with whatever text has
+    accumulated so far, treated as a normal (early) completion.
     """
     stream_body = {**body, "stream": True}
     payload = json.dumps(stream_body).encode()
@@ -538,6 +553,8 @@ def _do_claude_request_streaming(
     try:
         with urllib.request.urlopen(req, timeout=timeout_seconds) as resp:
             for raw in resp:
+                if cancel_event is not None and cancel_event.is_set():
+                    break
                 line = raw.decode("utf-8", errors="replace").rstrip("\r\n")
                 if line.startswith("event: "):
                     current_event = line[7:].strip()
@@ -680,6 +697,7 @@ class APIClient(abc.ABC):
         on_list_files: Callable[[], str] | None = None,
         on_get_file_summary: Callable[[str], str] | None = None,
         on_chunk: Callable[[str], None] | None = None,
+        cancel_event: threading.Event | None = None,
     ) -> tuple[str, bool]:
         """Send *messages* to the backend and return (reply_text, success)."""
         ...
@@ -706,6 +724,7 @@ class OpenAIClient(APIClient):
         on_list_files: Callable[[], str] | None = None,
         on_get_file_summary: Callable[[str], str] | None = None,
         on_chunk: Callable[[str], None] | None = None,
+        cancel_event: threading.Event | None = None,
     ) -> tuple[str, bool]:
         return call(
             self.url,
@@ -719,6 +738,7 @@ class OpenAIClient(APIClient):
             on_get_file_summary=on_get_file_summary,
             on_chunk=on_chunk,
             timeout_seconds=self.timeout_seconds,
+            cancel_event=cancel_event,
         )
 
 
@@ -755,6 +775,7 @@ class ClaudeClient(APIClient):
         on_list_files: Callable[[], str] | None = None,
         on_get_file_summary: Callable[[str], str] | None = None,
         on_chunk: Callable[[str], None] | None = None,
+        cancel_event: threading.Event | None = None,
     ) -> tuple[str, bool]:
         headers = {
             "Content-Type": "application/json",
@@ -768,6 +789,8 @@ class ClaudeClient(APIClient):
         request_info = f"URL: {CLAUDE_API_URL}\nModel: {self.model}\nMessages: {len(messages)}"
 
         while rounds < _MAX_TOOL_ROUNDS:
+            if cancel_event is not None and cancel_event.is_set():
+                return "", True
             rounds += 1
             body: dict = {
                 "model": self.model,
@@ -782,7 +805,7 @@ class ClaudeClient(APIClient):
             # Use streaming when on_chunk is provided
             if on_chunk:
                 text, tool_use_blocks, err_msg, ok = _do_claude_request_streaming(
-                    headers, body, on_chunk, self.timeout_seconds
+                    headers, body, on_chunk, self.timeout_seconds, cancel_event=cancel_event
                 )
                 if not ok:
                     summary = _format_tool_summary(tools_invoked)

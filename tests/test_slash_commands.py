@@ -35,3 +35,23 @@ def test_command_prefix_without_space_does_not_match():
     """'/fixture' should not be treated as '/fix' + 'ture'."""
     display, api_query, cmd = slash_commands.parse("/fixture")
     assert cmd == ""
+
+
+def test_research_with_topic_is_returned_unexpanded():
+    """/research is a SPECIAL command (drives the /loop engine), not a TEMPLATES entry."""
+    display, api_query, cmd = slash_commands.parse("/research rust async runtimes")
+    assert cmd == "/research"
+    assert display == api_query == "/research rust async runtimes"
+
+
+def test_goal_and_loop_are_special_with_trailing_text():
+    for cmd_name in ("/goal", "/loop"):
+        display, api_query, cmd = slash_commands.parse(f"{cmd_name} ship the widget")
+        assert cmd == cmd_name
+        assert display == api_query == f"{cmd_name} ship the widget"
+
+
+def test_loop_without_argument_matches_bare_command():
+    display, api_query, cmd = slash_commands.parse("/loop")
+    assert cmd == "/loop"
+    assert display == api_query == "/loop"

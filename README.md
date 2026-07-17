@@ -21,6 +21,8 @@ Key features include:
 - **smart, localized merging** — accepting a suggestion never overwrites the whole file. the plugin anchors the snippet to the specific lines it actually changes (via your selection, a matched `def`/`class`, or fuzzy text-anchor localization), so edits, insertions, and deletions elsewhere in the snippet only touch what really changed — everything else in the file is left byte-for-byte alone. the same merge logic drives both the phantom preview and the actual Accept, so what you see is exactly what you get.
 - **apply with diff preview** — the **≋ diff** path opens a unified diff showing exactly what changes, with **✓ accept** / **✗ reject** before anything is written to disk.
 - **slash commands** — type a command alone in the input strip to trigger preset prompts or plugin actions. See the [Slash Commands](#slash-commands) section for details.
+- **interrupt** — while a response (or a `/loop` run) is streaming, the input area's idle hint is replaced with a **⏹ Stop generating** link; click it (or press **Ctrl+C** while the input area has focus) to cancel. It lives in the input pane rather than the chat panel so it stays put instead of scrolling away as the reply streams in.
+- **`/goal` and `/loop`** — declare a persistent goal with `/goal <description>`, then run `/loop` to iteratively pursue it across multiple turns (using `read_file`, `fetch_url`, `list_project_files`, `get_file_summary`), stopping once the model reports the goal is done, the iteration cap is hit, or you interrupt it. `/loop <description>` sets the goal and starts the run in one step.
 - **project rules** — place an `agents.md` and/or `skills.md` file at the git root. their contents are automatically prepended to the system prompt at the start of each window session, letting you set project-specific instructions, conventions, or personas.
 - **suggested commands** — when the model recommends a shell command to run (tests, linter, build), it outputs it in a `suggested-command` fenced block. the plugin displays it but **never executes it** — you copy and run it yourself.
 - **multi-file referencing** — type `@filename.ext` in the input area to include any open or project file.
@@ -45,13 +47,26 @@ Slash commands are preset prompts or plugin actions triggered by typing a comman
 | `/review` | Perform a code review for correctness, style, and performance. |
 | `/debug` | Root-cause analysis and fix proposal for the selected code. |
 | `/docs` | Write docstrings and comments for the selected code. |
-| `/research` | Research a topic using the `fetch_url` tool and cite sources. |
 | `/diff` | Explain and review the current working-tree diff. |
 | `/init` | Crawl the project directory and build the file-summary cache. |
-| `/compact` | Clear the conversation history for this window. |
+| `/compact` | Clear the conversation history for this window (also clears any stored `/goal`). |
 | `/clear` | Same as `/compact`. |
+| `/goal <description>` | Store a persistent goal for this window. `/goal` alone shows the current goal. |
+| `/loop [description]` | Iteratively pursue a goal across multiple turns until the model reports it's done, the iteration cap is hit, or you interrupt it. Uses the stored `/goal` if no description is given; a description sets-and-runs in one step. See [`/goal` and `/loop`](#goal-and-loop) below. |
+| `/research <topic>` | Multi-iteration research on a topic: consults several sources via `fetch_url` across turns (rather than one single-shot burst) and cites sources. Runs on the same engine as `/loop`. |
 
-Slash commands must be the **entire input** (e.g., type `/explain` alone, then press `Ctrl+Enter`).
+Most commands take the rest of the line as an argument (e.g. `/fix there's a race condition in the handler`); `/explain`, `/tests`, `/review`, `/debug`, `/docs`, `/diff`, `/init`, `/compact`, `/clear` act on the current selection/file instead and are typically used alone. Slash commands must be typed at the **start of the input** (the whole input for argument-less commands), then submitted with `Ctrl+Enter`.
+
+### `/goal` and `/loop`
+
+`/goal` and `/loop` drive an iterative agent loop for multi-turn work (research, investigation, incremental refactoring plans) instead of a single request/response:
+
+1. `/goal <description>` stores the goal for the window and echoes it in the chat panel. `/goal` with no text shows whatever goal is currently stored.
+2. `/loop` resumes the stored goal; `/loop <description>` sets a new goal and starts immediately. Each iteration is a normal assistant turn (with the same `read_file` / `fetch_url` / `list_project_files` / `get_file_summary` tools as everything else) that ends with a hidden status marker telling the plugin whether to keep going.
+3. The loop stops when the model reports the goal is complete, when it reaches `loop_max_iterations` (default 8, see [Configuration](#configuration)), when a reply is missing its status marker (treated as "done" — the safe default, since a model that stops following the loop protocol shouldn't keep burning requests), or when you click **⏹ Stop generating** in the input pane / press **Ctrl+C**.
+4. The loop never writes files on its own — any code it proposes still shows up as a normal Apply/inline-phantom suggestion that you accept by hand.
+
+`/research <topic>` is a preset on top of this same engine: it sets a research-flavored goal for you (consult multiple sources, cross-check, cite everything) and runs the loop immediately.
 
 ---
 
@@ -113,6 +128,10 @@ For Mistral or Claude API use, set your API key via the Command Palette after re
 | Open chat + input area | `Ctrl+L` |
 | Submit a message | Type in the input strip → `Ctrl+Enter` |
 | Run a slash command | Type `/command` alone → `Ctrl+Enter` |
+| Interrupt a response or `/loop` run | Click **⏹ Stop generating** in the input pane, or press `Ctrl+C` while the input area is focused and a request is running |
+| Set a goal | Type `/goal <description>` → `Ctrl+Enter` |
+| Run the goal loop | Type `/loop` (or `/loop <description>`) → `Ctrl+Enter` |
+| Research a topic across iterations | Type `/research <topic>` → `Ctrl+Enter` |
 | Reference a file | `@filename.ext` anywhere in your message |
 | Accept inline suggestion | Click **✓ Accept** in the editor phantom |
 | Open diff for inline suggestion | Click **≋ Diff** in the editor phantom |
@@ -164,6 +183,7 @@ Edit `SublimeAssistant.sublime-settings` (or create a User override in `Packages
   - `model` — Model ID to use.
   - `backend` — `"openai"` (default, covers Ollama/Mistral/LM Studio) or `"claude"` (Anthropic). Required for Claude API usage.
 - **`request_timeout`** — Timeout in seconds for an AI request (default 120). Increase when using fetch_url or with slow token generation.
+- **`loop_max_iterations`** — Maximum number of turns a `/loop` or `/research` run will take before stopping on its own (default 8). Raise it for deeper research/investigation runs; lower it to cap cost/time.
 - **`system_prompt`** — Instructions prepended to every conversation. Project rules from `AGENTS.md` / `SKILLS.md` are prepended on top of this.
 
 Top-level `api_url` / `api_key` / `model` are used as fallbacks when no preset is active or when a preset omits a key.
@@ -286,6 +306,7 @@ SublimeAssistant/
 │   ├── git.py                 # Git subprocess helpers (diff, log, status)
 │   ├── history.py             # Per-window conversation history
 │   ├── input_view.py          # Input area view (bottom-right strip)
+│   ├── loop_runner.py         # /goal + /loop iteration prompts and status-marker parsing
 │   ├── project_rules.py       # Load AGENTS.md / SKILLS.md from git root
 │   ├── slash_commands.py      # Slash command parsing and template expansion
 │   ├── summarizer.py          # Crawl git root and produce a code-structure summary
