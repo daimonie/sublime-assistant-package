@@ -2,101 +2,100 @@
 
 [![tests](https://github.com/daimonie/sublime-assistant-package/actions/workflows/tests.yml/badge.svg)](https://github.com/daimonie/sublime-assistant-package/actions/workflows/tests.yml)
 
-**SublimeAssistant** brings AI-powered coding assistance directly into **Sublime Text 4**. Seamlessly connect your editor to a local LLM (via Ollama), the Mistral API, or the Claude (Anthropic) API for a streamlined workflow. Generate code, debug issues, and document projects—all without leaving your keyboard.
+**An AI coding agent that lives inside Sublime Text 4.** Not a sidebar chatbot bolted onto your editor — a plugin that reads your project, proposes precise edits, and applies them exactly where they belong, with any LLM backend you choose. Local, cloud, your call.
 
-Key features include:
-- A persistent chat panel for context-aware conversations.
-- Inline code suggestions with one-click apply.
-- File referencing and streaming responses.
-- Lightweight, thread-safe, and dependency-free (Python 3.8).
+No subscription. No Electron shell. No sending your whole file just to change one line. Just Sublime Text, talking to a model, editing your code the way you would.
 
 ---
 
-## features
+## Why SublimeAssistant
 
-- **context-aware ai** — automatically sends the active file and any selected text with every query.
-- **persistent chat panel** — a dedicated markdown split-pane that keeps the full conversation history per window.
-- **streaming responses** — token-by-token display as the model generates, so you see the reply as it arrives.
-- **inline phantom suggestions** — every code block the assistant produces shows a colored red/green diff phantom directly in your editor at the target location, with **accept** (instant apply), **≋ diff** (open diff preview), and **dismiss** buttons. no need to leave the editor to review a suggestion.
-- **smart, localized merging** — accepting a suggestion never overwrites the whole file. the plugin anchors the snippet to the specific lines it actually changes (via your selection, a matched `def`/`class`, or fuzzy text-anchor localization), so edits, insertions, and deletions elsewhere in the snippet only touch what really changed — everything else in the file is left byte-for-byte alone. the same merge logic drives both the phantom preview and the actual Accept, so what you see is exactly what you get.
-- **apply with diff preview** — the **≋ diff** path opens a unified diff showing exactly what changes, with **✓ accept** / **✗ reject** before anything is written to disk.
-- **slash commands** — type a command alone in the input strip to trigger preset prompts or plugin actions. See the [Slash Commands](#slash-commands) section for details.
-- **interrupt** — while a response (or a `/loop` run) is streaming, the input area's idle hint is replaced with a **⏹ Stop generating** link; click it (or press **Ctrl+C** while the input area has focus) to cancel. It lives in the input pane rather than the chat panel so it stays put instead of scrolling away as the reply streams in.
-- **`/goal` and `/loop`** — declare a persistent goal with `/goal <description>`, then run `/loop` to iteratively pursue it across multiple turns (using `read_file`, `fetch_url`, `list_project_files`, `get_file_summary`), stopping once the model reports the goal is done, the iteration cap is hit, or you interrupt it. `/loop <description>` sets the goal and starts the run in one step.
-- **project rules** — place an `agents.md` and/or `skills.md` file at the git root. their contents are automatically prepended to the system prompt at the start of each window session, letting you set project-specific instructions, conventions, or personas.
-- **suggested commands** — when the model recommends a shell command to run (tests, linter, build), it outputs it in a `suggested-command` fenced block. the plugin displays it but **never executes it** — you copy and run it yourself.
-- **multi-file referencing** — type `@filename.ext` in the input area to include any open or project file.
-- **tool use** — the model can call `read_file`, `fetch_url`, `list_project_files`, and `get_file_summary` tools mid-conversation. tool calls are shown in the chat footer.
-- **directory summary (lazy)** — run `/init` or **summarize directory** from the command palette to crawl the git root and build llm-generated per-file descriptions. the summary is cached to `.sublime_assistant_summary.md`. when the model needs project context it calls `list_project_files` / `get_file_summary` rather than having the entire summary injected into every message.
-- **new file creation** — when the llm suggests a brand-new file, the apply workflow lets you review and create it with one click.
-- **preset switching** — switch between a local ollama endpoint, the mistral api, or the claude api from the command palette without touching config files.
-- **auto-reload on save** — when you edit any file in `sublimeassistant/assistant/` *from within Sublime Text*, the submodule is hot-reloaded automatically. editing those files with an external tool (another editor, an AI coding agent) won't trigger this — restart Sublime Text to pick up the change.
-- **asynchronous** — api calls run in a background thread; the editor never freezes.
+- **You own the backend.** Point it at a local Ollama model with zero data leaving your machine, or at the Mistral or Claude API when you want more horsepower. Switch between them from the Command Palette — no config file editing, no restart.
+- **Edits land exactly where they should.** SublimeAssistant doesn't paste a wall of text over your file. It localizes each change — via your selection, a matched `def`/`class`, or fuzzy anchor matching — so accepting a suggestion only touches the lines that actually changed. Everything else stays byte-for-byte alone.
+- **It's an agent, not a Q&A box.** Give it a goal and let `/loop` iterate across turns — reading files, fetching URLs, crawling your project — until the goal is done. It never writes to disk without your explicit accept, but it can *investigate* on its own.
+- **It respects your keyboard.** `Ctrl+L` opens it, `Ctrl+Enter` submits, everything else — accept, diff, dismiss — is a click on an inline phantom right where your cursor already is.
+- **Zero dependencies.** Pure Python 3.8 stdlib, the same interpreter Sublime Text already bundles. Nothing to `pip install` to get started.
 
 ---
 
-## Slash Commands
+## What it does
 
-Slash commands are preset prompts or plugin actions triggered by typing a command alone in the input strip (e.g., `/explain`). You can append extra context after the command (e.g., `/fix there's a race condition in the handler`).
-
-| Command | Description |
-|---------|-------------|
-| `/explain` | Explain the selected code in detail. |
-| `/fix` | Identify and fix bugs in the selected code. |
-| `/tests` | Write unit tests for the selected code. |
-| `/review` | Perform a code review for correctness, style, and performance. |
-| `/debug` | Root-cause analysis and fix proposal for the selected code. |
-| `/docs` | Write docstrings and comments for the selected code. |
-| `/diff` | Explain and review the current working-tree diff. |
-| `/init` | Crawl the project directory and build the file-summary cache. |
-| `/compact` | Clear the conversation history for this window (also clears any stored `/goal`). |
-| `/clear` | Same as `/compact`. |
-| `/goal <description>` | Store a persistent goal for this window. `/goal` alone shows the current goal. |
-| `/loop [description]` | Iteratively pursue a goal across multiple turns until the model reports it's done, the iteration cap is hit, or you interrupt it. Uses the stored `/goal` if no description is given; a description sets-and-runs in one step. See [`/goal` and `/loop`](#goal-and-loop) below. |
-| `/research <topic>` | Multi-iteration research on a topic: consults several sources via `fetch_url` across turns (rather than one single-shot burst) and cites sources. Runs on the same engine as `/loop`. |
-
-Most commands take the rest of the line as an argument (e.g. `/fix there's a race condition in the handler`); `/explain`, `/tests`, `/review`, `/debug`, `/docs`, `/diff`, `/init`, `/compact`, `/clear` act on the current selection/file instead and are typically used alone. Slash commands must be typed at the **start of the input** (the whole input for argument-less commands), then submitted with `Ctrl+Enter`.
-
-### `/goal` and `/loop`
-
-`/goal` and `/loop` drive an iterative agent loop for multi-turn work (research, investigation, incremental refactoring plans) instead of a single request/response:
-
-1. `/goal <description>` stores the goal for the window and echoes it in the chat panel. `/goal` with no text shows whatever goal is currently stored.
-2. `/loop` resumes the stored goal; `/loop <description>` sets a new goal and starts immediately. Each iteration is a normal assistant turn (with the same `read_file` / `fetch_url` / `list_project_files` / `get_file_summary` tools as everything else) that ends with a hidden status marker telling the plugin whether to keep going.
-3. The loop stops when the model reports the goal is complete, when it reaches `loop_max_iterations` (default 8, see [Configuration](#configuration)), when a reply is missing its status marker (treated as "done" — the safe default, since a model that stops following the loop protocol shouldn't keep burning requests), or when you click **⏹ Stop generating** in the input pane / press **Ctrl+C**.
-4. The loop never writes files on its own — any code it proposes still shows up as a normal Apply/inline-phantom suggestion that you accept by hand.
-
-`/research <topic>` is a preset on top of this same engine: it sets a research-flavored goal for you (consult multiple sources, cross-check, cite everything) and runs the loop immediately.
+- **Context-aware chat** — every query automatically includes the active file and any selection, so you don't have to paste code by hand.
+- **Persistent chat panel** — a dedicated markdown split-pane holding the full conversation history per window.
+- **Streaming responses** — token-by-token, so you see the reply as it's generated.
+- **Inline phantom suggestions** — every code block the assistant produces shows a colored red/green diff directly in your editor at the target location, with **accept** (instant apply), **≋ diff** (preview), and **dismiss** buttons. Review and apply without leaving the file.
+- **Smart, localized merging** — accepting a suggestion never overwrites the whole file. The plugin anchors the snippet to the specific lines it actually changes, so edits, insertions, and deletions elsewhere in the snippet only touch what really changed. The same merge logic drives both the phantom preview and the actual Accept, so what you see is exactly what you get.
+- **Diff preview before writing** — the **≋ diff** path opens a unified diff with **✓ accept** / **✗ reject** before anything touches disk.
+- **New file creation** — when the model proposes a brand-new file, the apply workflow lets you review and create it with one click.
+- **Multi-file referencing** — type `@filename.ext` in the input area to pull any open or project file into context.
+- **Interrupt anytime** — while a response or `/loop` run is streaming, click **⏹ Stop generating** (or press `Ctrl+C` with the input focused) to cancel.
+- **Slash commands** — preset prompts (`/explain`, `/fix`, `/tests`, `/review`, `/debug`, `/docs`, `/diff`) and plugin actions (`/init`, `/compact`) triggered by typing a command alone. See [Slash Commands](#slash-commands).
+- **Suggested shell commands, never run for you** — when the model recommends a test/lint/build command, it's shown in a fenced block for you to copy and run — the plugin never executes it.
+- **Project rules** — an `AGENTS.md` and/or `SKILLS.md` at the git root are automatically prepended to the system prompt once per window session, so you can set project-specific conventions, constraints, or personas.
+- **Directory summary, built lazily** — `/init` crawls the git root and builds LLM-generated per-file descriptions, cached to disk. The model pulls context on demand via tools instead of the whole summary being injected into every message.
+- **Asynchronous by design** — API calls run on a background thread; the editor never freezes waiting on a response.
 
 ---
 
-| Model | VRAM needed | Notes |
-|-------|-------------|-------|
-| `devstral-small-2:latest` (22 B) | ~14 GB | Requires a high-end consumer GPU (RTX 3090 / 4090, or better) |
+## Harness capabilities: it can act, not just answer
 
-If you do not have a suitable GPU, **use the Mistral API preset instead** — it runs the same model in the cloud with no local hardware requirement. See [Configuration](#configuration) below.
+SublimeAssistant's chat isn't limited to one prompt in, one reply out. It has a tool-use loop and an iteration engine underneath it, so it can go find the answer instead of guessing at it.
+
+**Tools available mid-conversation:**
+
+| Tool | What it does |
+|------|---------------|
+| `read_file` | Reads any file in the project |
+| `fetch_url` | Fetches and reads a web page |
+| `list_project_files` | Lists files under the git root |
+| `get_file_summary` | Pulls a cached per-file summary (built by `/init`) |
+
+Tool calls are shown in the chat footer as they happen, so you can see what the model is doing, not just what it concludes.
+
+**`/goal` and `/loop` — a persistent, multi-turn agent:**
+
+1. `/goal <description>` stores a goal for the window.
+2. `/loop` (or `/loop <description>` to set-and-run in one step) resumes it. Each iteration is a normal turn — using the same tools above — that ends with a status marker telling the plugin whether to keep going.
+3. It stops when the model reports the goal is complete, when it hits `loop_max_iterations` (default 8), or when you interrupt it.
+4. **It never writes files on its own.** Every code change it proposes, even mid-loop, still surfaces as a normal Apply / inline-phantom suggestion you accept by hand.
+
+**`/research <topic>`** runs the same engine with a research-flavored goal baked in: consult multiple sources across turns via `fetch_url`, cross-check them, and cite what it used — rather than one single-shot guess.
+
+This makes SublimeAssistant useful for more than autocomplete: point it at a topic, a bug, or a refactor, and let it spend several turns actually looking before it answers — while you stay the only one who can commit a change to disk.
 
 ---
 
-## Prerequisites
+## Bring your own LLM
 
-- **Sublime Text 4** build 4050 or later
-- **Python 3.8** (bundled with Sublime Text 4 — no extra install needed)
-- No external Python packages required (uses stdlib only)
-- **For local hosting:** Ollama installed and running, with a compatible model pulled (see above)
-- **For Mistral cloud:** A [Mistral API key](https://console.mistral.ai/)
-- **For Claude cloud:** An [Anthropic API key](https://console.anthropic.com/) (see [Getting a Claude API key](#getting-a-claude-api-key))
+SublimeAssistant doesn't lock you into one model or one vendor. Every backend speaks through the same chat panel, the same tools, the same phantom-diff workflow — you just pick where the tokens come from.
 
-### Local setup (Ollama)
+| Backend | Where it runs | Good for |
+|---------|---------------|----------|
+| **Local (Ollama)** | Your machine | Zero cost per token, nothing leaves your machine, works offline |
+| **Mistral API** | Cloud | No GPU required, same open model family as the local default |
+| **Claude API** | Cloud | Strongest reasoning for large refactors, research, and multi-step `/loop` runs |
+| **Any OpenAI-compatible endpoint** | Your choice | LM Studio, vLLM, a company-hosted gateway — anything speaking the `/v1/chat/completions` shape |
+
+Switching is one command — **Command Palette → Sublime Assistant: Use preset Local / Mistral / Claude** — no restart, no config file editing. Mix and match per project by overriding `active_preset` in a workspace's settings.
+
+### Running fully local
 
 ```bash
-# Install Ollama, then pull the coding model
 ollama pull devstral-small-2:latest
 ```
 
-Ollama must be running on `http://localhost:11434` (its default). If Sublime Text runs on
-Windows and Ollama runs inside WSL, use the WSL hostname instead of `localhost`
-(e.g. `http://LanteanHome:11434/v1/chat/completions`).
+| Model | VRAM needed | Notes |
+|-------|-------------|-------|
+| `devstral-small-2:latest` (22B) | ~14 GB | Needs a high-end consumer GPU (RTX 3090/4090 or better) |
+
+No suitable GPU? Switch to the Mistral preset — it runs the same model family in the cloud with no local hardware requirement. Ollama must be reachable at `http://localhost:11434` (its default); if Sublime Text runs on Windows with Ollama inside WSL, use the WSL hostname instead of `localhost`.
+
+### Running in the cloud
+
+- **Mistral** — get an API key at [console.mistral.ai](https://console.mistral.ai/), then set it via Command Palette → **Sublime Assistant: Set Mistral API key**.
+- **Claude** — get an API key at [console.anthropic.com](https://console.anthropic.com/) (see [Getting a Claude API key](#getting-a-claude-api-key)), then set it via Command Palette → **Sublime Assistant: Set Claude API key**.
+
+Keys are written to your User settings, never to the package folder or version control.
 
 ---
 
@@ -116,8 +115,13 @@ cd "YOUR_PACKAGES_FOLDER"
 git clone https://github.com/YOUR_USERNAME/SublimeAssistant.git
 ```
 
-Restart Sublime Text. No further setup is needed for local Ollama use.
-For Mistral or Claude API use, set your API key via the Command Palette after restarting (see below).
+Restart Sublime Text. That's it for local Ollama use — no further setup needed. For Mistral or Claude, set your API key via the Command Palette after restarting (see [Running in the cloud](#running-in-the-cloud) above).
+
+**Prerequisites:**
+- Sublime Text 4, build 4050+
+- Python 3.8 (bundled with Sublime Text — nothing extra to install)
+- No external Python packages, ever
+- Ollama (for local hosting), or a Mistral/Claude API key (for cloud)
 
 ---
 
@@ -128,26 +132,44 @@ For Mistral or Claude API use, set your API key via the Command Palette after re
 | Open chat + input area | `Ctrl+L` |
 | Submit a message | Type in the input strip → `Ctrl+Enter` |
 | Run a slash command | Type `/command` alone → `Ctrl+Enter` |
-| Interrupt a response or `/loop` run | Click **⏹ Stop generating** in the input pane, or press `Ctrl+C` while the input area is focused and a request is running |
-| Set a goal | Type `/goal <description>` → `Ctrl+Enter` |
-| Run the goal loop | Type `/loop` (or `/loop <description>`) → `Ctrl+Enter` |
-| Research a topic across iterations | Type `/research <topic>` → `Ctrl+Enter` |
+| Interrupt a response or `/loop` run | Click **⏹ Stop generating** in the input pane, or `Ctrl+C` while the input area is focused |
+| Set a goal | `/goal <description>` → `Ctrl+Enter` |
+| Run the goal loop | `/loop` (or `/loop <description>`) → `Ctrl+Enter` |
+| Research a topic across iterations | `/research <topic>` → `Ctrl+Enter` |
 | Reference a file | `@filename.ext` anywhere in your message |
 | Accept inline suggestion | Click **✓ Accept** in the editor phantom |
 | Open diff for inline suggestion | Click **≋ Diff** in the editor phantom |
 | Dismiss inline suggestion | Click **✗ Dismiss** in the editor phantom |
 | Apply from chat panel | Click **Apply** below a code block in the chat |
-| Accept diff | Click **✓ Accept** in the diff preview |
-| Reject diff | Click **✗ Reject** in the diff preview |
-| Build project file index | Type `/init` → `Ctrl+Enter` |
-| Clear conversation history | Type `/compact` → `Ctrl+Enter` |
-| Switch to local (Ollama) | Command Palette → **Sublime Assistant: Use preset Local** |
-| Switch to Mistral API | Command Palette → **Sublime Assistant: Use preset Mistral** |
-| Switch to Claude API | Command Palette → **Sublime Assistant: Use preset Claude** |
-| Set Mistral API key | Command Palette → **Sublime Assistant: Set Mistral API key** |
-| Set Claude API key | Command Palette → **Sublime Assistant: Set Claude API key** |
+| Accept / reject diff preview | **✓ Accept** / **✗ Reject** in the diff preview |
+| Build project file index | `/init` → `Ctrl+Enter` |
+| Clear conversation history | `/compact` → `Ctrl+Enter` |
+| Switch backend | Command Palette → **Sublime Assistant: Use preset Local / Mistral / Claude** |
+| Set an API key | Command Palette → **Sublime Assistant: Set Mistral / Claude API key** |
 | Select model (any preset) | Command Palette → **Sublime Assistant: Select Model** |
 | Summarize current directory | Command Palette → **Sublime Assistant: Summarize Directory** |
+
+---
+
+## Slash Commands
+
+Slash commands are preset prompts or plugin actions triggered by typing a command alone in the input strip (e.g., `/explain`). You can append extra context after the command (e.g., `/fix there's a race condition in the handler`). Must be typed at the **start** of the input, then submitted with `Ctrl+Enter`.
+
+| Command | Description |
+|---------|-------------|
+| `/explain` | Explain the selected code in detail. |
+| `/fix` | Identify and fix bugs in the selected code. |
+| `/tests` | Write unit tests for the selected code. |
+| `/review` | Perform a code review for correctness, style, and performance. |
+| `/debug` | Root-cause analysis and fix proposal for the selected code. |
+| `/docs` | Write docstrings and comments for the selected code. |
+| `/diff` | Explain and review the current working-tree diff. |
+| `/init` | Crawl the project directory and build the file-summary cache. |
+| `/compact` | Clear the conversation history for this window (also clears any stored `/goal`). |
+| `/clear` | Same as `/compact`. |
+| `/goal <description>` | Store a persistent goal for this window. `/goal` alone shows the current goal. |
+| `/loop [description]` | Iteratively pursue a goal across multiple turns. Uses the stored `/goal` if no description is given. See [Harness capabilities](#harness-capabilities-it-can-act-not-just-answer). |
+| `/research <topic>` | Multi-iteration research on a topic, citing sources. Runs on the same engine as `/loop`. |
 
 ---
 
@@ -219,8 +241,6 @@ Top-level `api_url` / `api_key` / `model` are used as fallbacks when no preset i
 
 **Claude model IDs:** Use `claude-sonnet-4-6` (balanced), `claude-opus-4-8` (most capable), or `claude-haiku-4-5-20251001` (fastest/cheapest). Use **Sublime Assistant: Select Model** in the Command Palette to browse all available models.
 
-**Switch preset:** Command Palette (`Ctrl+Shift+P`) → **Sublime Assistant: Use preset Local**, **Use preset Mistral**, or **Use preset Claude**.
-
 ### Getting a Claude API key
 
 1. Go to [console.anthropic.com](https://console.anthropic.com) and sign up or log in.
@@ -282,7 +302,7 @@ For **partial edits** (one function, one section, one table) the model is instru
 
 - **405 Method Not Allowed (Ollama):** The plugin sends a `tools` parameter so the model can call `fetch_url`, `read_file`, etc. Point the **local** preset at **Ollama directly** (`http://localhost:11434/v1/chat/completions`), not at Open WebUI (port 3000) — Open WebUI's proxy may reject requests that include `tools`. Ollama 0.15.x+ supports tool calling on that endpoint. If Sublime runs on Windows and Ollama is in WSL, use the WSL hostname or IP instead of `localhost`.
 - **Request timed out:** Increase **`request_timeout`** in settings (e.g. 60 or 120). The fetch_url step uses a separate 30-second timeout for fetching the page; the `request_timeout` covers the LLM response after the page content is sent.
-- **"truncating input prompt" in Ollama logs:** The fetched page plus your conversation exceeded Ollama's context window. Set `OLLAMA_NUM_CTX=65536` (or higher) in your Ollama environment. Devstral supports up to 384 k tokens.
+- **"truncating input prompt" in Ollama logs:** The fetched page plus your conversation exceeded Ollama's context window. Set `OLLAMA_NUM_CTX=65536` (or higher) in your Ollama environment. Devstral supports up to 384k tokens.
 - **Model not found / 400 from Mistral:** List valid IDs with `GET https://api.mistral.ai/v1/models`. Set `presets.mistral.model` to `mistral-small-latest` in User settings as a safe fallback.
 - **`/init` does nothing visible:** The command triggers a background crawl and LLM enrichment pass. Check `View → Show Console` for `[SA]` log lines. The enrichment can take 30–60 seconds depending on project size and model speed.
 - **Inline phantom in wrong location:** Localization is tried in order: your selection, a matched `def`/`class` name, then fuzzy text-anchor matching against the rest of the file. If the snippet shares no recognizable content with the file at all (e.g. a wholesale rewrite with very different wording), it falls back to the cursor position or a full-file replacement. Selecting the text you want changed before submitting is the most reliable way to pin the location exactly.
