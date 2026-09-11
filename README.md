@@ -1,4 +1,6 @@
-# SublimeAssistant
+# SublimeAssistant (Discontinued)
+
+**Discontinued**: Note that this was a personal project by the author to experiment with creating agent harnesses. It is fairly usable in day-to-day work, but pi.dev and mistral vibe for coding offer way more functionality (and of course, everyone is on claude code at the time of writing). 
 
 [![tests](https://github.com/daimonie/sublime-assistant-package/actions/workflows/tests.yml/badge.svg)](https://github.com/daimonie/sublime-assistant-package/actions/workflows/tests.yml)
 
