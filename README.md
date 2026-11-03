@@ -101,6 +101,8 @@ ollama pull devstral-small-2:latest
 
 No suitable GPU? Switch to the Mistral preset — it runs the same model family in the cloud with no local hardware requirement. Ollama must be reachable at `http://localhost:11434` (its default); if Sublime Text runs on Windows with Ollama inside WSL, use the WSL hostname instead of `localhost`.
 
+**Local server with an API key (vLLM, LM Studio, auth proxy, …):** point `presets.local.api_url` at the server (e.g. `http://localhost:8000/v1/chat/completions` for vLLM) and set `presets.local.model` to a model ID the server actually serves (check with **Sublime Assistant: Select Model**). If the server requires a key (e.g. vLLM started with `--api-key`), set it via Command Palette → **Sublime Assistant: Set Local API key**; it is sent as `Authorization: Bearer <key>`. Leave the key empty for servers that need none (such as plain Ollama) — no `Authorization` header is sent then.
+
 ### Running in the cloud
 
 - **Mistral** — get an API key at [console.mistral.ai](https://console.mistral.ai/), then set it via Command Palette → **Sublime Assistant: Set Mistral API key**.
@@ -156,7 +158,7 @@ Restart Sublime Text. That's it for local Ollama use — no further setup needed
 | Build project file index | `/init` → `Ctrl+Enter` |
 | Clear conversation history | `/compact` → `Ctrl+Enter` |
 | Switch backend | Command Palette → **Sublime Assistant: Use preset Local / Mistral / Claude** |
-| Set an API key | Command Palette → **Sublime Assistant: Set Mistral / Claude API key** |
+| Set an API key | Command Palette → **Sublime Assistant: Set Local / Mistral / Claude API key** |
 | Select model (any preset) | Command Palette → **Sublime Assistant: Select Model** |
 | Summarize current directory | Command Palette → **Sublime Assistant: Summarize Directory** |
 | Interrupt the in-flight request | Command Palette → **Sublime Assistant: Interrupt** (same as `Ctrl+C` / **⏹ Stop generating**) |
@@ -297,6 +299,7 @@ Keep API keys out of the plugin folder (and out of version control) by storing t
 
 **Option A — Command Palette (recommended)**
 
+- For Local (e.g. an Ollama/LLM server behind an auth proxy): `Ctrl+Shift+P` → **Sublime Assistant: Set Local API key** → paste key → Enter. Leave `api_key` empty (`""`) if your local server needs no key — no `Authorization` header is sent then.
 - For Mistral: `Ctrl+Shift+P` → **Sublime Assistant: Set Mistral API key** → paste key → Enter.
 - For Claude: `Ctrl+Shift+P` → **Sublime Assistant: Set Claude API key** → paste key → Enter.
 
@@ -341,6 +344,8 @@ For **partial edits** (one function, one section, one table) the model is instru
 ## Troubleshooting
 
 - **405 Method Not Allowed (Ollama):** The plugin sends a `tools` parameter so the model can call `fetch_url`, `read_file`, etc. Point the **local** preset at **Ollama directly** (`http://localhost:11434/v1/chat/completions`), not at Open WebUI (port 3000) — Open WebUI's proxy may reject requests that include `tools`. Ollama 0.15.x+ supports tool calling on that endpoint. If Sublime runs on Windows and Ollama is in WSL, use the WSL hostname or IP instead of `localhost`.
+- **`URLError: [WinError 10061] … actively refused it` / `Connection refused`:** Nothing is listening at the active preset's `api_url`. Check the host and port — and remember your **User** settings override the package settings, so a stale `presets.local.api_url` there wins. Verify with `curl http://localhost:<port>/v1/models`.
+- **401 Unauthorized from a local server:** The server requires an API key. Set it via **Sublime Assistant: Set Local API key**.
 - **Request timed out:** Increase **`request_timeout`** in settings (e.g. 60 or 120). The fetch_url step uses a separate 30-second timeout for fetching the page; the `request_timeout` covers the LLM response after the page content is sent.
 - **"truncating input prompt" in Ollama logs:** The fetched page plus your conversation exceeded Ollama's context window. Set `OLLAMA_NUM_CTX=65536` (or higher) in your Ollama environment. Devstral supports up to 384k tokens.
 - **Model not found / 400 from Mistral:** List valid IDs with `GET https://api.mistral.ai/v1/models`. Set `presets.mistral.model` to `mistral-small-latest` in User settings as a safe fallback.

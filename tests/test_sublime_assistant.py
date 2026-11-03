@@ -145,6 +145,58 @@ class TestGetApiConfig:
         assert backend == "openai"
 
 
+    def test_whitespace_only_api_key_is_treated_as_empty(self, tmp_path):
+        with self._patch_packages_path(tmp_path, {}):
+            settings = FakeSettings({
+                "active_preset": "local",
+                "presets": {"local": {"api_key": "   "}},
+            })
+            _, key, _, _, _ = sa._get_api_config(settings)
+        assert key == ""
+
+
+# ── SublimeAssistantSetApiKeyCommand ──────────────────────────────────────
+
+class TestSetApiKeyCommand:
+    def _run(self, settings, preset=None, typed="  new-key  ", cls=None):
+        cls = cls or sa.SublimeAssistantSetApiKeyCommand
+        window = FakeWindow()
+        captured = {}
+
+        def show_input_panel(caption, initial, on_done, on_change, on_cancel):
+            captured["caption"], captured["initial"] = caption, initial
+            on_done(typed)
+
+        window.show_input_panel = show_input_panel
+        cmd = cls.__new__(cls)
+        cmd.window = window
+        with patch("sublime.load_settings", return_value=settings):
+            cmd.run(preset) if preset else cmd.run()
+        return captured
+
+    def test_sets_key_for_named_preset_and_strips_whitespace(self):
+        settings = FakeSettings({"presets": {"local": {"api_key": "old", "model": "m"}}})
+        captured = self._run(settings, preset="local")
+        assert captured["initial"] == "old"
+        assert "Local" in captured["caption"]
+        assert settings.get("presets")["local"] == {"api_key": "new-key", "model": "m"}
+
+    def test_defaults_to_active_preset(self):
+        settings = FakeSettings({"active_preset": "mistral", "presets": {}})
+        self._run(settings)
+        assert settings.get("presets")["mistral"]["api_key"] == "new-key"
+
+    def test_empty_input_clears_key(self):
+        settings = FakeSettings({"presets": {"local": {"api_key": "old"}}})
+        self._run(settings, preset="local", typed="   ")
+        assert settings.get("presets")["local"]["api_key"] == ""
+
+    def test_legacy_claude_command_targets_claude_preset(self):
+        settings = FakeSettings({"active_preset": "local", "presets": {}})
+        self._run(settings, cls=sa.SublimeAssistantSetClaudeApiKeyCommand)
+        assert settings.get("presets") == {"claude": {"api_key": "new-key"}}
+
+
 # ── _make_client ──────────────────────────────────────────────────────────
 
 class TestMakeClient:

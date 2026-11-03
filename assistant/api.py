@@ -133,7 +133,7 @@ def fetch_models(api_url: str, api_key: str) -> tuple[list[str], str]:
     models_url = urllib.parse.urlunparse(base)
 
     headers = {"Content-Type": "application/json"}
-    if api_key:
+    if api_key := api_key.strip():
         headers["Authorization"] = f"Bearer {api_key}"
 
     req = urllib.request.Request(models_url, headers=headers)
@@ -519,7 +519,7 @@ def call(
     cancel_event: if set, checked before each request/tool round and mid-stream; an early stop is treated as a
     normal completion with whatever text has been produced so far."""
     headers = {"Content-Type": "application/json"}
-    if api_key:
+    if api_key := api_key.strip():
         headers["Authorization"] = f"Bearer {api_key}"
 
     timeout = timeout_seconds if timeout_seconds is not None else _TIMEOUT

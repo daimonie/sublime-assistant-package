@@ -102,6 +102,31 @@ class TestFetchModels:
         assert "Authorization" not in captured["headers"]
 
 
+    def test_omits_auth_header_with_whitespace_only_api_key(self):
+        body = json.dumps({"data": [{"id": "m"}]}).encode()
+        captured = {}
+
+        def fake_urlopen(req, timeout=None):
+            captured["headers"] = req.headers
+            return FakeResponse(body)
+
+        with patch("urllib.request.urlopen", side_effect=fake_urlopen):
+            api.fetch_models("http://x/v1/chat/completions", "   ")
+        assert "Authorization" not in captured["headers"]
+
+    def test_sends_bearer_header_with_api_key(self):
+        body = json.dumps({"data": [{"id": "m"}]}).encode()
+        captured = {}
+
+        def fake_urlopen(req, timeout=None):
+            captured["headers"] = req.headers
+            return FakeResponse(body)
+
+        with patch("urllib.request.urlopen", side_effect=fake_urlopen):
+            api.fetch_models("http://x/v1/chat/completions", "secret")
+        assert captured["headers"]["Authorization"] == "Bearer secret"
+
+
 # ── _strip_html ──────────────────────────────────────────────────────────
 
 class TestStripHtml:

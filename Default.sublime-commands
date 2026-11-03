@@ -1,11 +1,18 @@
 [
     {
+        "caption": "Sublime Assistant: Set Local API key",
+        "command": "sublime_assistant_set_api_key",
+        "args": { "preset": "local" }
+    },
+    {
         "caption": "Sublime Assistant: Set Mistral API key",
-        "command": "sublime_assistant_set_mistral_api_key"
+        "command": "sublime_assistant_set_api_key",
+        "args": { "preset": "mistral" }
     },
     {
         "caption": "Sublime Assistant: Set Claude API key",
-        "command": "sublime_assistant_set_claude_api_key"
+        "command": "sublime_assistant_set_api_key",
+        "args": { "preset": "claude" }
     },
     {
         "caption": "Sublime Assistant: Select Model",

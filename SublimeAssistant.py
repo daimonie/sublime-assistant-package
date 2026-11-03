@@ -239,7 +239,7 @@ def _get_api_config(settings: sublime.Settings) -> tuple[str, str, str, str, str
         return settings.get(key, default)
 
     url = _get("api_url", "http://localhost:11434/v1/chat/completions")
-    api_key = _get("api_key", "")
+    api_key = _get("api_key", "").strip()
     model = _get("model", "devstral-small-2:latest")
     system_prompt = settings.get("system_prompt", "You are a helpful coding assistant.")
     backend = _get("backend", "openai")
@@ -1018,56 +1018,48 @@ class SublimeAssistantUsePresetCommand(sublime_plugin.WindowCommand):
         sublime.status_message(f"SublimeAssistant: using preset «{preset}»")
 
 
-class SublimeAssistantSetMistralApiKeyCommand(sublime_plugin.WindowCommand):
-    """Prompt for the Mistral API key and save it to User settings."""
+class SublimeAssistantSetApiKeyCommand(sublime_plugin.WindowCommand):
+    """Prompt for a preset's API key and save it to User settings.
 
-    def run(self) -> None:
+    preset: name of the preset to update; defaults to the active preset.
+    An empty key is saved as "" so no Authorization header is sent.
+    """
+
+    def run(self, preset: str | None = None) -> None:
         settings = sublime.load_settings("SublimeAssistant.sublime-settings")
+        preset = preset or settings.get("active_preset") or "local"
         presets = dict(settings.get("presets") or {})
-        mistral = dict(presets.get("mistral") or {})
-        initial = mistral.get("api_key") or ""
+        entry = dict(presets.get(preset) or {})
+        label = preset.capitalize()
 
         def on_done(key: str) -> None:
-            key = key.strip()
-            mistral["api_key"] = key
-            presets["mistral"] = mistral
+            entry["api_key"] = key.strip()
+            presets[preset] = entry
             settings.set("presets", presets)
             sublime.save_settings("SublimeAssistant.sublime-settings")
-            sublime.status_message("SublimeAssistant: Mistral API key saved to User settings.")
+            sublime.status_message(f"SublimeAssistant: {label} API key saved to User settings.")
 
         self.window.show_input_panel(
-            "Mistral API key:",
-            initial,
+            f"{label} API key (leave empty for none):",
+            entry.get("api_key") or "",
             on_done,
             None,
             None,
         )
 
 
-class SublimeAssistantSetClaudeApiKeyCommand(sublime_plugin.WindowCommand):
-    """Prompt for the Claude API key and save it to User settings."""
+class SublimeAssistantSetMistralApiKeyCommand(SublimeAssistantSetApiKeyCommand):
+    """Backwards-compatible alias: set the Mistral preset's API key."""
 
-    def run(self) -> None:
-        settings = sublime.load_settings("SublimeAssistant.sublime-settings")
-        presets = dict(settings.get("presets") or {})
-        claude = dict(presets.get("claude") or {})
-        initial = claude.get("api_key") or ""
+    def run(self, preset: str | None = None) -> None:
+        super().run("mistral")
 
-        def on_done(key: str) -> None:
-            key = key.strip()
-            claude["api_key"] = key
-            presets["claude"] = claude
-            settings.set("presets", presets)
-            sublime.save_settings("SublimeAssistant.sublime-settings")
-            sublime.status_message("SublimeAssistant: Claude API key saved to User settings.")
 
-        self.window.show_input_panel(
-            "Claude API key:",
-            initial,
-            on_done,
-            None,
-            None,
-        )
+class SublimeAssistantSetClaudeApiKeyCommand(SublimeAssistantSetApiKeyCommand):
+    """Backwards-compatible alias: set the Claude preset's API key."""
+
+    def run(self, preset: str | None = None) -> None:
+        super().run("claude")
 
 
 class SublimeAssistantSubmitCommand(sublime_plugin.TextCommand):
