@@ -479,7 +479,7 @@ def _do_request_streaming(
                 for tc_delta in delta.get("tool_calls") or []:
                     idx = tc_delta.get("index", 0)
                     if idx not in tc_by_index:
-                        tc_by_index[idx] = {"id": "", "function": {"name": "", "arguments": ""}}
+                        tc_by_index[idx] = {"id": "", "type": "function", "function": {"name": "", "arguments": ""}}
                     entry = tc_by_index[idx]
                     entry["id"] = entry["id"] or tc_delta.get("id", "")
                     fn_delta = tc_delta.get("function") or {}

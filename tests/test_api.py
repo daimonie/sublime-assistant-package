@@ -508,6 +508,7 @@ class TestDoRequestStreaming:
         assert ok is True
         assert len(tool_calls) == 1
         assert tool_calls[0]["id"] == "call_1"
+        assert tool_calls[0]["type"] == "function"
         assert tool_calls[0]["function"]["name"] == "fetch_url"
         assert tool_calls[0]["function"]["arguments"] == '{"url":"http://x"}'
 
